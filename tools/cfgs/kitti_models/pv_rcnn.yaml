@@ -102,6 +102,8 @@ MODEL:
             BOX_CODER: ResidualCoder
 
         LOSS_CONFIG:
+            ALPHA_FOCAL: 0.25
+            GAMMA_FOCAL: 2.0
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
                 'loc_weight': 2.0,
@@ -159,7 +161,16 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
-
+        ENABLE_EVAL: False
+        ADAPTIVE_THRESH_CONFIG:
+            NAME: AdaptiveThresholdGMM
+            ENABLE: False
+            PERCENT: 0.1
+            PRE_FILTERING_THRESH: 0.1
+            RESET_STATE_INTERVAL: 256
+            INTERVAL_SIZE: 16
+            ENABLE_PLOTS: False
+        METRICS_PRED_TYPES: [pred_gt]
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -226,6 +237,7 @@ MODEL:
             NMS_PRE_MAXSIZE: 4096
             NMS_POST_MAXSIZE: 500
 
+    STORE_SCORES_IN_PKL: True
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 2

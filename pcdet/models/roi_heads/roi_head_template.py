@@ -68,6 +68,21 @@ class RoIHeadTemplate(nn.Module):
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
         batch_cls_preds = batch_dict['batch_cls_preds']
+        # # rpn score based adaptive thresholding
+        # if self.forward_ret_dict is not None:
+        #     if 'adaptive_thresh_metric' in self.forward_ret_dict and self.model_cfg.ADAPTIVE_THRESH_CONFIG.get('ENABLE', False):
+        #         adaptive_thresh_metric = self.forward_ret_dict['adaptive_thresh_metric']
+        #         unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+                
+        #         metric_inputs = {}
+        #         for metric_update_key in adaptive_thresh_metric._update_signature.parameters.keys():
+        #             if metric_update_key in ['batch_label']:
+        #                 metric_inputs[metric_update_key] = self.forward_ret_dict['roi_labels'][unlabeled_inds].detach().clone()
+        #             elif metric_update_key in ['batch_conf_score','batch_score']:
+        #                 metric_inputs[metric_update_key] = torch.sigmoid(batch_cls_preds)[unlabeled_inds].detach().clone()
+        #             elif metric_update_key in ['batch_iou_score']:
+        #                 metric_inputs[metric_update_key] = self.forward_ret_dict['gt_iou_of_rois'][unlabeled_inds].detach().clone()
+        #         adaptive_thresh_metric.update(**metric_inputs)
         rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
         roi_scores = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE))
         roi_labels = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
@@ -101,6 +116,115 @@ class RoIHeadTemplate(nn.Module):
         batch_dict['has_class_labels'] = True if batch_cls_preds.shape[-1] > 1 else False
         batch_dict.pop('batch_index', None)
         return batch_dict
+    
+    def update_metrics(self, targets_dict, mask_type='cls', vis_type='pred_gt', pred_type=None):
+        metric_registry = targets_dict['metric_registry']
+        unlabeled_inds = targets_dict['unlabeled_inds']
+
+        sample_preds, sample_pred_scores, sample_pred_weights = [], [], []
+        sample_rois, sample_roi_scores = [], []
+        sample_targets, sample_target_scores = [], []
+        sample_pls, sample_pl_scores = [], []
+        ema_preds_of_std_rois, ema_pred_scores_of_std_rois = [], []
+        sample_gts = []
+        sample_gt_iou_of_rois = []
+        for i, uind in enumerate(unlabeled_inds):
+            mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
+                        targets_dict['rcnn_cls_labels'][uind] >= 0)
+
+            # (Proposals) ROI info
+            rois = targets_dict['rois'][uind][mask].detach().clone()
+            roi_labels = targets_dict['roi_labels'][uind][mask].unsqueeze(-1).detach().clone()
+            roi_scores = torch.sigmoid(targets_dict['roi_scores'])[uind][mask].detach().clone()
+            roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
+            gt_iou_of_rois = targets_dict['gt_iou_of_rois'][uind][mask].unsqueeze(-1).detach().clone()
+            sample_rois.append(roi_labeled_boxes)
+            sample_roi_scores.append(roi_scores)
+            sample_gt_iou_of_rois.append(gt_iou_of_rois)
+            # Target info
+            target_labeled_boxes = targets_dict['gt_of_rois_src'][uind][mask].detach().clone()
+            target_scores = targets_dict['rcnn_cls_labels'][uind][mask].detach().clone()
+            sample_targets.append(target_labeled_boxes)
+            sample_target_scores.append(target_scores)
+
+            # Pred info
+            pred_boxes = targets_dict['batch_box_preds'][uind][mask].detach().clone()
+            pred_scores = torch.sigmoid(targets_dict['rcnn_cls']).view_as(targets_dict['rcnn_cls_labels'])[uind][mask].detach().clone()
+            pred_labeled_boxes = torch.cat([pred_boxes, roi_labels], dim=-1)
+            sample_preds.append(pred_labeled_boxes)
+            sample_pred_scores.append(pred_scores)
+
+            # (Real labels) GT info
+            gt_labeled_boxes = targets_dict['ori_gt_boxes'][uind]
+            sample_gts.append(gt_labeled_boxes)
+
+            # (Pseudo labels) PL info
+            pl_labeled_boxes = targets_dict['pl_boxes'][uind]
+            pl_scores = targets_dict['pl_scores'][i]
+            sample_pls.append(pl_labeled_boxes)
+            sample_pl_scores.append(pl_scores)
+
+            if 'rcnn_cls_weights' in targets_dict:
+                pred_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
+                sample_pred_weights.append(pred_weights)
+
+            # Teacher refinements (Preds) of student's rois
+            if 'ema_gt' in pred_type and self.get('ENABLE_SOFT_TEACHER', False):
+                pred_boxes_ema = targets_dict['batch_box_preds_teacher'][uind][mask].detach().clone()
+                pred_labeled_boxes_ema = torch.cat([pred_boxes_ema, roi_labels], dim=-1)
+                pred_scores_ema = targets_dict['rcnn_cls_score_teacher'][uind][mask].detach().clone()
+                ema_preds_of_std_rois.append(pred_labeled_boxes_ema)
+                ema_pred_scores_of_std_rois.append(pred_scores_ema)
+            if self.model_cfg.get('ENABLE_SOFT_TEACHER', False):
+                pred_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
+                sample_pred_weights.append(pred_weights)
+
+        sample_pred_weights = sample_pred_weights if len(sample_pred_weights) > 0 else None
+
+        if 'pred_gt' in pred_type:
+            tag = f'rcnn_pred_gt_metrics_{mask_type}'
+            metrics = metric_registry.get(tag)
+            metric_inputs = {'preds': sample_preds, 'pred_scores': sample_pred_scores, 'rois': sample_rois,
+                             'roi_scores': sample_roi_scores, 'ground_truths': sample_gts,
+                             'targets': sample_targets, 'target_scores': sample_target_scores,
+                             'pred_weights': sample_pred_weights}
+            metrics.update(**metric_inputs)
+        if 'ema_gt' in pred_type and self.model_cfg.get('ENABLE_SOFT_TEACHER', False):
+            tag = f'rcnn_ema_gt_metrics_{mask_type}'
+            metrics_ema = metric_registry.get(tag)
+            metric_inputs_ema = {'preds': ema_preds_of_std_rois, 'pred_scores': ema_pred_scores_of_std_rois,
+                                 'ground_truths': sample_gts, 'pred_weights': sample_pred_weights}
+            metrics_ema.update(**metric_inputs_ema)
+        if 'roi_pl' in pred_type:
+            tag = f'rcnn_roi_pl_metrics_{mask_type}'
+            metrics_roi_pl = metric_registry.get(tag)
+            metric_inputs_roi_pl = {'preds': sample_rois, 'pred_scores': sample_roi_scores, 'ground_truths': sample_pls,
+                                    'targets': sample_targets, 'target_scores': sample_target_scores,
+                                    'pred_weights': sample_pred_weights}
+            metrics_roi_pl.update(**metric_inputs_roi_pl)
+        if 'pred_pl' in pred_type:
+            tag = f'rcnn_pred_pl_metrics_{mask_type}'
+            metrics_pred_pl = metric_registry.get(tag)
+            metric_inputs_pred_pl = {'preds': sample_preds, 'pred_scores': sample_pred_scores, 'rois': sample_rois,
+                                     'roi_scores': sample_roi_scores, 'ground_truths': sample_pls,
+                                     'targets': sample_targets, 'target_scores': sample_target_scores,
+                                     'pred_weights': sample_pred_weights}
+            metrics_pred_pl.update(**metric_inputs_pred_pl)
+        if 'roi_pl_gt' in pred_type:
+            # get dynamic threshold
+            roi_iou_pl_dynamic_thresh=None
+            if 'thresh_registry' in self.forward_ret_dict:
+                roi_iou_pl_dynamic_thresh = self.forward_ret_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh').iou_local_thresholds.tolist()
+            
+            tag = f'rcnn_roi_pl_gt_metrics_{mask_type}'
+            metrics = metric_registry.get(tag)
+            metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
+                             'ground_truths': sample_gts, 'targets': sample_targets,
+                             'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
+                             'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
+                             'pred_iou_wrt_pl': sample_gt_iou_of_rois, 
+                             'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}
+            metrics.update(**metric_inputs)
 
     def assign_targets(self, batch_dict):
         batch_size = batch_dict['batch_size']
@@ -262,6 +386,87 @@ class RoIHeadTemplate(nn.Module):
 
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict
+
+
+        if self.model_cfg.ADAPTIVE_THRESH_CONFIG.get('ENABLE', False):
+            thresh_registry = self.forward_ret_dict['thresh_registry']
+            tag = 'roi_iou_pl_adaptive_thresh'
+            adaptive_thresh = thresh_registry.get(tag)
+            unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+            labeled_inds=torch.tensor([i for i in range(self.forward_ret_dict['roi_labels'].shape[0]) if i not in unlabeled_inds], device=unlabeled_inds.device)
+            
+            metric_inputs = {}
+            for metric_update_key in adaptive_thresh._update_signature.parameters.keys():
+
+                if metric_update_key in ['batch_label', 'unlab_iou_label']:
+                    metric_inputs[metric_update_key] = self.forward_ret_dict['roi_labels'][unlabeled_inds].detach().clone()
+
+                elif metric_update_key in ['lab_iou_label']:
+                    metric_inputs[metric_update_key] = self.forward_ret_dict['roi_labels'][labeled_inds].detach().clone()
+
+                elif metric_update_key in ['batch_conf_score','batch_score', 'batch_cls_score']:
+                    metric_inputs[metric_update_key] = torch.sigmoid(self.forward_ret_dict['roi_scores'])[unlabeled_inds].detach().clone() #rpn cls score
+
+                elif metric_update_key in ['lab_cls_scores']:
+                    metric_inputs[metric_update_key] = torch.sigmoid(self.forward_ret_dict['roi_scores'])[labeled_inds].detach().clone() #rpn cls score
+
+                elif metric_update_key in ['batch_iou_score', 'unlab_iou_score']:
+                     metric_inputs[metric_update_key] = self.forward_ret_dict['gt_iou_of_rois'][unlabeled_inds].detach().clone()
+
+                elif metric_update_key in ['lab_iou_score']:
+                    metric_inputs[metric_update_key] = self.forward_ret_dict['gt_iou_of_rois'][labeled_inds].detach().clone()
+
+                elif metric_update_key in ['batch_rois']:
+                    metric_inputs[metric_update_key] = self.forward_ret_dict['rois'][unlabeled_inds].detach().clone()
+                
+                elif metric_update_key in ['batch_gts']:
+                    # adjust dimesion mismatch
+                    rois = self.forward_ret_dict['rois'][unlabeled_inds].detach().clone()
+                    ori_unlabeled_boxes = self.forward_ret_dict['ori_gt_boxes'][unlabeled_inds].detach().clone()
+                    num_zeros = rois.shape[1] - ori_unlabeled_boxes.shape[1]
+                    if num_zeros>0:
+                        ori_unlabeled_boxes = torch.cat([ori_unlabeled_boxes,
+                                            torch.zeros(ori_unlabeled_boxes.shape[0], num_zeros, ori_unlabeled_boxes.shape[2],
+                                                        device=rois.device)], dim=1)
+                    metric_inputs[metric_update_key] = ori_unlabeled_boxes
+
+                if metric_inputs[metric_update_key].ndim == 1: metric_inputs[metric_update_key]=metric_inputs[metric_update_key].unsqueeze(dim=0)
+                    
+            adaptive_thresh.update(**metric_inputs)
+
+        if self.model_cfg.get("ENABLE_EVAL", None):
+            # self.update_metrics(self.forward_ret_dict, mask_type='reg')
+            metrics_pred_types = self.model_cfg.get("METRICS_PRED_TYPES", None)
+            if metrics_pred_types is not None:
+                self.update_metrics(self.forward_ret_dict, mask_type='cls', pred_type=metrics_pred_types, vis_type='roi_pl')
+        
+            # unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
+            # gt_iou_of_rois = self.forward_ret_dict['gt_iou_of_rois'][unlabeled_inds].detach().clone()
+            # roi_labels = self.forward_ret_dict['roi_labels'][unlabeled_inds].detach().clone() - 1
+        
+            # # ----------- dynamic IoU assignment for unlabeled samples -----------       
+            # ulb_fg_thresh = adaptive_thresh.iou_local_thresholds.tolist() # Modeled with GMM for dynamic IOU FG Thresholding
+            # cls_bg_thresh = self.model_cfg.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH  # Could be Modeled with GMM for dynamic IOU BG Thresholding
+            # ignore_mask = torch.eq(self.forward_ret_dict['gt_of_rois'][unlabeled_inds], 0).all(dim=-1)
+            # gt_iou_of_rois[ignore_mask] = -1
+            # for cind in range(adaptive_thresh.num_classes):
+            #     cls_mask = roi_labels == cind
+            #     cls_gt_iou_of_rois = gt_iou_of_rois[cls_mask]
+            #     ulb_fg_mask = cls_gt_iou_of_rois > ulb_fg_thresh[cind]
+            #     ulb_bg_mask = cls_gt_iou_of_rois < cls_bg_thresh
+            #     ulb_interval_mask = ~(ulb_fg_mask | ulb_bg_mask)
+            #     # Hard labeling for FGs/BGs, soft labeling for UCs
+            #     if self.model_cfg.TARGET_CONFIG.get("UNLABELED_SHARP_RCNN_CLS_LABELS", False):
+            #         cls_gt_iou_of_rois[ulb_fg_mask] = 1.
+            #         cls_gt_iou_of_rois[ulb_bg_mask] = 0.
+            #     # Calibrate(normalize) raw IoUs as per FG and BG thresholds
+            #     if self.model_cfg.TARGET_CONFIG.get("UNLABELED_USE_CALIBRATED_IOUS", False):
+            #         cls_gt_iou_of_rois[ulb_interval_mask]  = (cls_gt_iou_of_rois[ulb_interval_mask] - cls_bg_thresh) \
+            #                                             / (cls_gt_iou_of_rois[ulb_interval_mask] - cls_bg_thresh)
+
+            #     self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds][cls_mask] = cls_gt_iou_of_rois
+
+
         rcnn_loss_cls, cls_tb_dict = self.get_box_cls_layer_loss(self.forward_ret_dict, scalar=scalar)
         #rcnn_loss = rcnn_loss_cls
         tb_dict.update(cls_tb_dict)
