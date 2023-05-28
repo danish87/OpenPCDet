@@ -231,6 +231,12 @@ class AnchorHeadTemplate(nn.Module):
 
         return box_loss, tb_dict
 
+    def calc_entropy(self,lambda_=0.75):
+        pred_scores = self.forward_ret_dict['cls_preds']
+        pred_scores = pred_scores.view(int(pred_scores.shape[0]), -1) # [batch, num_anchors x self.num_class]
+        pred_scores=torch.sigmoid(pred_scores)
+        return -lambda_ * torch.sum(pred_scores * (torch.log(pred_scores + 1e-5)), 1)
+    
     def get_loss(self, scalar=True):
         cls_loss, tb_dict = self.get_cls_layer_loss(scalar=scalar)
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)

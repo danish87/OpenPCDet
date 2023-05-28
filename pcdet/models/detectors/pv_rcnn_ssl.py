@@ -144,8 +144,30 @@ class PVRCNN_SSL(Detector3DTemplate):
                 loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum()
             else:
                 loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum() + loss_rcnn_box[unlabeled_inds, ...].sum() * self.unlabeled_weight
+            
+            # entropy regularization
+            rcnn_unlbd_entropy=0
+            rpn_unlbd_entropy=0
 
-            loss = loss_rpn_cls + loss_rpn_box + loss_point + loss_rcnn_cls + loss_rcnn_box
+            if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RCNN_ENTROPY_REG", False):
+                entropy =self.pv_rcnn.roi_head.calc_entropy(
+                    lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RCNN_ENTROPY_REG_LAMBDA", 0.25)
+                    )
+                rcnn_unlbd_entropy=entropy[unlabeled_inds, ...].mean()
+                tb_dict['rcnn_lbd_entropy'] = entropy[labeled_inds, ...].mean()
+                tb_dict['rcnn_unlbd_entropy'] = rcnn_unlbd_entropy
+
+                
+            if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RPN_ENTROPY_REG", False):
+                entropy =self.pv_rcnn.dense_head.calc_entropy(
+                    lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RPN_ENTROPY_REG_LAMBDA", 0.005)
+                    )
+                rpn_unlbd_entropy=entropy[unlabeled_inds, ...].mean()
+                tb_dict['rcnn_lbd_entropy'] = entropy[labeled_inds, ...].mean()
+                tb_dict['rcnn_unlbd_entropy'] = rpn_unlbd_entropy
+            
+            loss = loss_rpn_cls + loss_rpn_box + loss_point + loss_rcnn_cls + loss_rcnn_box + rcnn_unlbd_entropy + rpn_unlbd_entropy
+            
             tb_dict_ = {}
             for key in tb_dict.keys():
                 if 'loss' in key:

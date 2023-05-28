@@ -207,6 +207,10 @@ MODEL:
             CLS_LOSS: BinaryCrossEntropy
             REG_LOSS: smooth-l1
             CORNER_LOSS_REGULARIZATION: True
+            ENABLE_RCNN_ENTROPY_REG: False
+            RCNN_ENTROPY_REG_LAMBDA: 0.25
+            ENABLE_RPN_ENTROPY_REG: False
+            RPN_ENTROPY_REG_LAMBDA: 0.005
             LOSS_WEIGHTS: {
                 'rcnn_cls_weight': 1.0,
                 'rcnn_reg_weight': 1.0,

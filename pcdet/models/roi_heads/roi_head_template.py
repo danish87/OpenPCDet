@@ -359,6 +359,12 @@ class RoIHeadTemplate(nn.Module):
         }
         return rcnn_loss_cls, tb_dict
 
+    def calc_entropy(self,lambda_=0.75):
+        pred_scores = self.forward_ret_dict['rcnn_cls']
+        pred_scores = pred_scores.view_as(self.forward_ret_dict['rcnn_cls_labels'])
+        pred_scores = torch.sigmoid(pred_scores)
+        return -lambda_ * torch.sum(pred_scores * (torch.log(pred_scores + 1e-5)), 1)
+
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict
         if self.model_cfg.get("ENABLE_EVAL", None):
