@@ -385,16 +385,17 @@ class KITTIEvalMetrics(Metric):
                 pr_cls[cls_name] = num_ulb_cls / (ulb_lbl_ratio * num_lbl_cls)
 
             cls_dist = {}
-            for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
-                cls_dist[cls_name+'_lbl'] = lbl_cls_counter[cls_name] / sum(lbl_cls_counter.values())
-                cls_dist[cls_name+'_ulb'] = ulb_cls_counter[cls_name] / sum(ulb_cls_counter.values())
-            lbl_dist = torch.tensor(list(lbl_cls_counter.values())) / sum(lbl_cls_counter.values())
-            ulb_dist = torch.tensor(list(ulb_cls_counter.values())) / sum(ulb_cls_counter.values())
+            if sum(ulb_cls_counter.values()):
+                for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
+                    cls_dist[cls_name+'_lbl'] = lbl_cls_counter[cls_name] / sum(lbl_cls_counter.values())
+                    cls_dist[cls_name+'_ulb'] = ulb_cls_counter[cls_name] / sum(ulb_cls_counter.values())
+                lbl_dist = torch.tensor(list(lbl_cls_counter.values())) / sum(lbl_cls_counter.values())
+                ulb_dist = torch.tensor(list(ulb_cls_counter.values())) / sum(ulb_cls_counter.values())
 
-            kl_div = F.kl_div(ulb_dist.log().unsqueeze(0), lbl_dist.unsqueeze(0), reduction="batchmean").item()
-            kitti_eval_metrics['class_distribution'] = cls_dist
-            kitti_eval_metrics['kl_div'] = kl_div
-            kitti_eval_metrics['PR'] = pr_cls
+                kl_div = F.kl_div(ulb_dist.log().unsqueeze(0), lbl_dist.unsqueeze(0), reduction="batchmean").item()
+                kitti_eval_metrics['class_distribution'] = cls_dist
+                kitti_eval_metrics['kl_div'] = kl_div
+                kitti_eval_metrics['PR'] = pr_cls
 
             # Get calculated Precision
             for m, metric_name in enumerate(['mAP_3d', 'mAP_3d_R40']):

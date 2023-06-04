@@ -206,11 +206,11 @@ MODEL:
         LOSS_CONFIG:
             CLS_LOSS: BinaryCrossEntropy
             REG_LOSS: smooth-l1
-            CORNER_LOSS_REGULARIZATION: True
             ENABLE_RCNN_ENTROPY_REG: False
             RCNN_ENTROPY_REG_LAMBDA: 0.25
             ENABLE_RPN_ENTROPY_REG: False
             RPN_ENTROPY_REG_LAMBDA: 0.005
+            CORNER_LOSS_REGULARIZATION: True
             LOSS_WEIGHTS: {
                 'rcnn_cls_weight': 1.0,
                 'rcnn_reg_weight': 1.0,
@@ -222,7 +222,7 @@ MODEL:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
         SCORE_THRESH: 0.1
         OUTPUT_RAW_SCORE: False
-        ENABLE_KITTI_EVAL: True
+        ENABLE_KITTI_EVAL: False
         EVAL_METRIC: kitti
 
         NMS_CONFIG:
