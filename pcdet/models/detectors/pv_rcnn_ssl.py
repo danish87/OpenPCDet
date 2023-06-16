@@ -217,6 +217,33 @@ class PVRCNN_SSL(Detector3DTemplate):
                     num_gts = valid_gt_boxes_mask.sum()
                     num_preds = valid_rois_mask.sum()
 
+                    for tag_ in ['max_iou_before_subsampling', 'max_iou_after_subsampling']:
+                        iter_name_ =  f'{tag_}_iteration'
+                        cur_iteration = torch.ones_like(torch.tensor(self.pv_rcnn.roi_head.forward_ret_dict[tag_][index_][1])) * (batch_dict['cur_iteration'])
+                        if index_ in unlabeled_inds:
+                            if not iter_name_ in self.val_unlbd_dict:
+                                self.val_unlbd_dict[iter_name_]=[]
+                            self.val_unlbd_dict[iter_name_].extend(cur_iteration.tolist())
+                        else:
+                            if not iter_name_ in self.val_lbd_dict:
+                                self.val_lbd_dict[iter_name_]=[]
+                            self.val_lbd_dict[iter_name_].extend(cur_iteration.tolist())
+
+                        for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_][index_].items():
+                            name_ = f'{tag_}_{self.dataset.class_names[key-1]}'
+                            
+                            if index_ in unlabeled_inds:
+                                if not name_ in self.val_unlbd_dict:
+                                    self.val_unlbd_dict[name_]=[]
+                                self.val_unlbd_dict[name_].extend(val)
+                            else:
+                                if not name_ in self.val_lbd_dict:
+                                    self.val_lbd_dict[name_]=[]
+                                self.val_lbd_dict[name_].extend(val)
+                            
+                            
+
+
                     if num_gts > 0 and num_preds > 0:
                         overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
                         preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
@@ -247,8 +274,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                             self.val_lbd_dict['roi_labels'].extend(batch_roi_labels[index_].tolist())
                             self.val_lbd_dict['iteration'].extend(cur_iteration.tolist())
                 
-                # print([(k,len(v)) for k, v in self.val_lbd_dict.items()])
-                # print([(k,len(v)) for k, v in self.val_unlbd_dict.items()])
+                # print([(k,len(v)) for k, v in self.val_lbd_dict.items() if len(v) ])
+                # print([(k,len(v)) for k, v in self.val_unlbd_dict.items() if len(v) ])
                 
                 # replace old pickle data (if exists) with updated one 
                 output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]

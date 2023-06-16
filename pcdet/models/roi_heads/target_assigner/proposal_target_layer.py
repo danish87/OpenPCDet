@@ -29,7 +29,7 @@ class ProposalTargetLayer(nn.Module):
                 reg_valid_mask: (B, M)
                 rcnn_cls_labels: (B, M)
         """
-        batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels = self.sample_rois_for_rcnn(
+        batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, ret_subsampling_dict = self.sample_rois_for_rcnn(
             batch_dict=batch_dict
         )
         # regression valid mask
@@ -58,6 +58,8 @@ class ProposalTargetLayer(nn.Module):
                         'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
                         'reg_valid_mask': reg_valid_mask,
                         'rcnn_cls_labels': batch_cls_labels}
+        
+        targets_dict.update(**ret_subsampling_dict)
 
         return targets_dict
 
@@ -85,6 +87,8 @@ class ProposalTargetLayer(nn.Module):
         batch_roi_ious = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
+        classwise_max_iou_accumulated_before_subsampling = {index:{} for index in range(batch_size)}
+        classwise_max_iou_accumulated_after_subsampling = {index:{} for index in range(batch_size)}
 
         for index in range(batch_size):
             cur_roi, cur_gt, cur_roi_labels, cur_roi_scores = \
@@ -96,7 +100,7 @@ class ProposalTargetLayer(nn.Module):
             cur_gt = cur_gt.new_zeros((1, cur_gt.shape[1])) if len(cur_gt) == 0 else cur_gt
 
             if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-                max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+                max_overlaps, gt_assignment, classwise_max_iou_dict = self.get_max_iou_with_same_class(
                     rois=cur_roi, roi_labels=cur_roi_labels,
                     gt_boxes=cur_gt[:, 0:7], gt_labels=cur_gt[:, -1].long()
                 )
@@ -105,6 +109,32 @@ class ProposalTargetLayer(nn.Module):
                 max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
 
             sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
+            
+            
+            # accumulate classwise samples for 
+            
+            for cind in range(3):
+                class_label = cind + 1
+                # before subsampling
+                if class_label not in classwise_max_iou_accumulated_before_subsampling[index]:
+                    classwise_max_iou_accumulated_before_subsampling[index][class_label] = []
+                
+                if class_label in classwise_max_iou_dict:
+                    cur_max_overlaps= classwise_max_iou_dict[class_label]
+                else:
+                   cur_max_overlaps = roi_labels.new_full((max_overlaps.shape[0],), -1) # padded with -1 to keep 0
+
+                classwise_max_iou_accumulated_before_subsampling[index][class_label].extend(cur_max_overlaps.tolist())
+               
+
+                # after subsampling
+                if class_label not in classwise_max_iou_accumulated_after_subsampling[index]:
+                    classwise_max_iou_accumulated_after_subsampling[index][class_label] = []
+                
+                roi_mask = (cur_roi_labels[sampled_inds] == class_label)
+                cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
+                cur_max_overlaps = torch.cat([cur_max_overlaps, cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0
+                classwise_max_iou_accumulated_after_subsampling[index][class_label].extend(cur_max_overlaps.tolist())
 
             batch_rois[index] = cur_roi[sampled_inds]
             batch_roi_labels[index] = cur_roi_labels[sampled_inds]
@@ -112,7 +142,9 @@ class ProposalTargetLayer(nn.Module):
             batch_roi_scores[index] = cur_roi_scores[sampled_inds]
             batch_gt_of_rois[index] = cur_gt[gt_assignment[sampled_inds]]
 
-        return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels
+        ret_dict = {'max_iou_before_subsampling':classwise_max_iou_accumulated_before_subsampling,
+                    'max_iou_after_subsampling':classwise_max_iou_accumulated_after_subsampling }
+        return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, ret_dict
 
     def subsample_rois(self, max_overlaps):
         # sample fg, easy_bg, hard_bg
@@ -197,7 +229,7 @@ class ProposalTargetLayer(nn.Module):
         Args:
             rois: (N, 7)
             roi_labels: (N)
-            gt_boxes: (N, )
+            gt_boxes: (N, 8)
             gt_labels:
 
         Returns:
@@ -211,6 +243,7 @@ class ProposalTargetLayer(nn.Module):
         """
         max_overlaps = rois.new_zeros(rois.shape[0])
         gt_assignment = roi_labels.new_zeros(roi_labels.shape[0])
+        classwise_max_iou = {}
 
         for k in range(gt_labels.min().item(), gt_labels.max().item() + 1):
             roi_mask = (roi_labels == k)
@@ -224,5 +257,7 @@ class ProposalTargetLayer(nn.Module):
                 cur_max_overlaps, cur_gt_assignment = torch.max(iou3d, dim=1)
                 max_overlaps[roi_mask] = cur_max_overlaps
                 gt_assignment[roi_mask] = original_gt_assignment[cur_gt_assignment]
+                classwise_max_iou[k] = torch.cat([cur_max_overlaps, cur_max_overlaps.new_full((rois.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0       
 
-        return max_overlaps, gt_assignment
+        return max_overlaps, gt_assignment, classwise_max_iou
+
