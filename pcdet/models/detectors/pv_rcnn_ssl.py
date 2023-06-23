@@ -88,8 +88,14 @@ class PVRCNN_SSL(Detector3DTemplate):
         vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'iteration','roi_labels', 'roi_scores']
         self.val_lbd_dict = {val: [] for val in vals_to_store}
         self.val_unlbd_dict = {val: [] for val in vals_to_store}
-
-
+        self._dict_map_ = {
+                'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
+                'iou_roi_gt': 'preds_iou_max',
+                'pred_scores': 'batch_pred_score[batch_index]',
+                'iteration': 'cur_iteration',
+                'roi_labels': 'batch_roi_labels[batch_index]',
+                'roi_scores': 'batch_roi_score[batch_index]'
+            }
 
     def forward(self, batch_dict):
         if self.training:
@@ -196,83 +202,76 @@ class PVRCNN_SSL(Detector3DTemplate):
 
 
             if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
-                # todo could be refactored 
+                # iter wise
+                for tag_ in ['classwise_unlab_max_iou_bfs', 'classwise_unlab_max_iou_afs', 'classwise_lab_max_iou_bfs', 'classwise_lab_max_iou_afs']:
+                    iter_name_ =  f'{tag_}_iteration'
+                    if not tag_ in self.pv_rcnn.roi_head.forward_ret_dict: continue
+                    cur_iteration = torch.ones_like(self.pv_rcnn.roi_head.forward_ret_dict[tag_][0]) * (batch_dict['cur_iteration'])
+                    if 'unlab' in tag_:
+                        if not iter_name_ in self.val_unlbd_dict:
+                            self.val_unlbd_dict[iter_name_]=[]
+                        self.val_unlbd_dict[iter_name_].extend(cur_iteration.tolist())
+                    else:
+                        if not iter_name_ in self.val_lbd_dict:
+                            self.val_lbd_dict[iter_name_]=[]
+                        self.val_lbd_dict[iter_name_].extend(cur_iteration.tolist())
+
+                    for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_].items():
+                        name_ = f'{tag_}_{self.dataset.class_names[key]}'
+                        if 'unlab' in tag_:
+                            if not name_ in self.val_unlbd_dict:
+                                self.val_unlbd_dict[name_]=[]
+                            self.val_unlbd_dict[name_].extend(val.tolist())
+                        else:
+                            if not name_ in self.val_lbd_dict:
+                                self.val_lbd_dict[name_]=[]
+                            self.val_lbd_dict[name_].extend(val.tolist())
+                
+                # batch wise
                 batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].detach().clone()
                 batch_rois = self.pv_rcnn.roi_head.forward_ret_dict['rois'].detach().clone()
                 batch_ori_gt_boxes = self.pv_rcnn.roi_head.forward_ret_dict['ori_gt_boxes'].detach().clone()
                 batch_iou_roi_pl = self.pv_rcnn.roi_head.forward_ret_dict['gt_iou_of_rois'].detach().clone()
                 batch_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).detach().clone().squeeze()
                 batch_roi_score =  torch.sigmoid(self.pv_rcnn.roi_head.forward_ret_dict['roi_scores']).detach().clone()
-                
-                for index_ in range(len(batch_rois)):
-                    valid_rois_mask = torch.logical_not(torch.all(batch_rois[index_] == 0, dim=-1))
-                    valid_rois = batch_rois[index_][valid_rois_mask]
-                    valid_roi_labels = batch_roi_labels[index_][valid_rois_mask]
+
+                for batch_index in range(len(batch_rois)):
+                    valid_rois_mask = torch.logical_not(torch.all(batch_rois[batch_index] == 0, dim=-1))
+                    valid_rois = batch_rois[batch_index][valid_rois_mask]
+                    valid_roi_labels = batch_roi_labels[batch_index][valid_rois_mask]
                     valid_roi_labels -= 1  
 
-                    valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[index_] == 0, dim=-1))
-                    valid_gt_boxes = batch_ori_gt_boxes[index_][valid_gt_boxes_mask]
+                    valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[batch_index] == 0, dim=-1))
+                    valid_gt_boxes = batch_ori_gt_boxes[batch_index][valid_gt_boxes_mask]
                     valid_gt_boxes[:, -1] -= 1  
 
                     num_gts = valid_gt_boxes_mask.sum()
                     num_preds = valid_rois_mask.sum()
 
-                    for tag_ in ['max_iou_before_subsampling', 'max_iou_after_subsampling']:
-                        iter_name_ =  f'{tag_}_iteration'
-                        cur_iteration = torch.ones_like(torch.tensor(self.pv_rcnn.roi_head.forward_ret_dict[tag_][index_][1])) * (batch_dict['cur_iteration'])
-                        if index_ in unlabeled_inds:
-                            if not iter_name_ in self.val_unlbd_dict:
-                                self.val_unlbd_dict[iter_name_]=[]
-                            self.val_unlbd_dict[iter_name_].extend(cur_iteration.tolist())
-                        else:
-                            if not iter_name_ in self.val_lbd_dict:
-                                self.val_lbd_dict[iter_name_]=[]
-                            self.val_lbd_dict[iter_name_].extend(cur_iteration.tolist())
-
-                        for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_][index_].items():
-                            name_ = f'{tag_}_{self.dataset.class_names[key-1]}'
-                            
-                            if index_ in unlabeled_inds:
-                                if not name_ in self.val_unlbd_dict:
-                                    self.val_unlbd_dict[name_]=[]
-                                self.val_unlbd_dict[name_].extend(val)
-                            else:
-                                if not name_ in self.val_lbd_dict:
-                                    self.val_lbd_dict[name_]=[]
-                                self.val_lbd_dict[name_].extend(val)
-                            
-                            
-
-
                     if num_gts > 0 and num_preds > 0:
                         overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
                         preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
                         cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
-                        #labeled_inds_ = torch.ones(preds_iou_max.shape[0], labeled_inds.shape[0], device=preds_iou_max.device) * (labeled_inds)
-                        #unlabeled_inds_ = torch.ones(preds_iou_max.shape[0], unlabeled_inds.shape[0], device=preds_iou_max.device) * (unlabeled_inds)
-                        if index_ in unlabeled_inds:
-                            self.val_unlbd_dict['iou_roi_gt'].extend(preds_iou_max.tolist())
-                            self.val_unlbd_dict['iou_roi_pl'].extend(batch_iou_roi_pl[index_].tolist())
-                            self.val_unlbd_dict['pred_scores'].extend(batch_pred_score[index_].tolist())
-                            self.val_unlbd_dict['roi_scores'].extend(batch_roi_score[index_].tolist())
-                            self.val_unlbd_dict['roi_labels'].extend(batch_roi_labels[index_].tolist())
-                            self.val_unlbd_dict['iteration'].extend(cur_iteration.tolist())
+                        if batch_index in unlabeled_inds:
+                            for val, map_val in self._dict_map_.items():
+                                self.val_unlbd_dict[val].extend(eval(map_val).tolist())
                             for tag in self.thresh_registry.tags():
-                                if tag in ['roi_iou_pl_adaptive_thresh']:
-                                    local_thresh = self.thresh_registry.get(tag).iou_local_thresholds.tolist()
-                                    for cind, class_name in self.thresh_registry.get(tag).class_names.items():
-                                        name_ = f'iou_local_thresh_{class_name}'
-                                        if not name_ in self.val_unlbd_dict:
-                                            self.val_unlbd_dict[name_]=[]
-                                        cur_thr = torch.ones_like(preds_iou_max) * local_thresh[cind]
-                                        self.val_unlbd_dict[name_].extend(cur_thr.tolist())
+                                if tag in ['roi_iou_pl_adaptive_thresh_afs']:
+                                    base_name='afs'
+                                elif tag in ['roi_iou_pl_adaptive_thresh_bfs']:
+                                    base_name='bfs'
+                                else:
+                                    continue
+                                local_thresh = self.thresh_registry.get(tag).iou_local_thresholds.tolist()
+                                for cind, class_name in self.thresh_registry.get(tag).class_names.items():
+                                    name_ = f'{base_name}_iou_local_thresh_{class_name}'
+                                    if not name_ in self.val_unlbd_dict:
+                                        self.val_unlbd_dict[name_]=[]
+                                    cur_thr = torch.ones_like(preds_iou_max) * local_thresh[cind]
+                                    self.val_unlbd_dict[name_].extend(cur_thr.tolist())
                         else:
-                            self.val_lbd_dict['iou_roi_gt'].extend(preds_iou_max.tolist())
-                            self.val_lbd_dict['iou_roi_pl'].extend(batch_iou_roi_pl[index_].tolist())
-                            self.val_lbd_dict['pred_scores'].extend(batch_pred_score[index_].tolist())
-                            self.val_lbd_dict['roi_scores'].extend(batch_roi_score[index_].tolist())
-                            self.val_lbd_dict['roi_labels'].extend(batch_roi_labels[index_].tolist())
-                            self.val_lbd_dict['iteration'].extend(cur_iteration.tolist())
+                            for val, map_val in self._dict_map_.items():
+                                self.val_lbd_dict[val].extend(eval(map_val).tolist())
                 
                 # print([(k,len(v)) for k, v in self.val_lbd_dict.items() if len(v) ])
                 # print([(k,len(v)) for k, v in self.val_unlbd_dict.items() if len(v) ])
@@ -282,10 +281,11 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pickle.dump(self.val_lbd_dict, open(os.path.join(output_dir, 'scores_lbd.pkl'), 'wb'))
                 pickle.dump(self.val_unlbd_dict, open(os.path.join(output_dir, 'scores_unlbd.pkl'), 'wb'))
 
+            # update eval metric results
             for key in self.metric_registry.tags():
                 metrics = self.compute_metrics(self.metric_registry, tag=key)
                 tb_dict_.update(metrics)
-
+            # update dynamic thresh results
             for key in self.thresh_registry.tags():
                 metrics = self.compute_metrics(self.thresh_registry, tag=key)
                 tb_dict_.update(metrics)

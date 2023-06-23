@@ -166,15 +166,15 @@ MODEL:
             NAME: AdaptiveThresholdGMM
             ENABLE: False
             PERCENT: 0.1
-            MOMENTUM: 0.99
+            MOMENTUM: 0.9
             PRE_FILTERING_THRESH: 0.1
             RESET_STATE_INTERVAL: 32
             ENABLE_PLOTS: False
             ENABLE_CLIPPING: False
-            GMM_POLICY: 'high'
+            GMM_POLICY: high
             MU1: 0.1
             MU2: 0.9
-        METRICS_PRED_TYPES: [roi_pl_gt]
+        METRICS_PRED_TYPES: [pred_pl, pred_gt, roi_pl_gt, adaptive_thresh_afs]
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -205,13 +205,14 @@ MODEL:
             BOX_CODER: ResidualCoder
             ROI_PER_IMAGE: 128
             FG_RATIO: 0.5
-            ENABLE_SUB_SAMPLE_UNLABELED_ROI: True #dynamic iou assignement
+            ENFORCE_UNIQUE_FG_REGIONS: True    
+            UNLABELED_SAMPLER: None
+            LABELED_SAMPLER: None
             SAMPLE_ROI_BY_EACH_CLASS: True
             CLS_SCORE_TYPE: roi_iou
             UNLABELED_CLS_FG_THRESH: [0.65, 0.45, 0.4]
             UNLABELED_CLS_BG_THRESH: 0.25
-            UNLABELED_SHARP_RCNN_CLS_LABELS: True
-            UNLABELED_USE_CALIBRATED_IOUS: True
+            CALIBRATED_IOUS: True
             CLS_FG_THRESH: 0.75
             CLS_BG_THRESH: 0.25
             CLS_BG_THRESH_LO: 0.1

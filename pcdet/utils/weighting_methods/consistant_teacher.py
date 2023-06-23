@@ -3,7 +3,6 @@ import numpy as np
 import torch
 from sklearn.mixture import GaussianMixture
 from torchmetrics import Metric
-from pcdet.ops.iou3d_nms import iou3d_nms_utils
 
 
 """
@@ -34,14 +33,14 @@ class AdaptiveThresholdGMM(Metric):
         #self.default_C =  torch.tensor([self.dataset.class_counter[cls_name] for _, cls_name in self.class_names.items()])
         #self.default_C = self.default_C/self.default_C.sum()
         
+        self.add_state("unlab_roi_labels", default=[], dist_reduce_fx='cat')
+        self.add_state("lab_roi_labels", default=[], dist_reduce_fx='cat')
         
-        self.add_state("batch_cls_score", default=[], dist_reduce_fx='cat')
-        self.add_state("batch_iou_score", default=[], dist_reduce_fx='cat')
-        self.add_state("batch_label", default=[], dist_reduce_fx='cat')
-        self.add_state("batch_rois", default=[], dist_reduce_fx='cat')
-        self.add_state("batch_gts", default=[], dist_reduce_fx='cat')
-        self.add_state("lab_iou_label", default=[], dist_reduce_fx='cat')
-        self.add_state("lab_iou_score", default=[], dist_reduce_fx='cat')
+        self.add_state("unlab_roi_scores", default=[], dist_reduce_fx='cat')
+        self.add_state("lab_roi_scores", default=[], dist_reduce_fx='cat')
+
+        self.add_state("unlab_gt_iou_of_rois", default=[], dist_reduce_fx='cat') #iou_wrt_pl
+        self.add_state("lab_gt_iou_of_rois", default=[], dist_reduce_fx='cat')
 
         
         
@@ -60,44 +59,48 @@ class AdaptiveThresholdGMM(Metric):
         )
         
 
-    def update(self, batch_label: torch.Tensor, batch_cls_score: torch.Tensor, batch_iou_score: torch.Tensor, 
-               batch_rois: torch.Tensor, batch_gts: torch.Tensor, 
-               lab_iou_score: torch.Tensor, lab_iou_label: torch.Tensor) -> None:
+    def update(self, unlab_roi_labels: torch.Tensor, lab_roi_labels: torch.Tensor, 
+               unlab_roi_scores: torch.Tensor, lab_roi_scores: torch.Tensor,
+               unlab_gt_iou_of_rois: torch.Tensor, lab_gt_iou_of_rois: torch.Tensor, ) -> None:
 
-        self.lab_iou_label.append(lab_iou_label)
-        self.lab_iou_score.append(lab_iou_score)
-        self.batch_gts.append(batch_gts)
-        self.batch_rois.append(batch_rois)
-        self.batch_iou_score.append(batch_iou_score)
-        self.batch_cls_score.append(batch_cls_score)
-        self.batch_label.append(batch_label)
+
+        self.unlab_roi_labels.append(unlab_roi_labels)
+        self.lab_roi_labels.append(lab_roi_labels)
+
+        self.unlab_roi_scores.append(unlab_roi_scores)
+        self.lab_roi_scores.append(lab_roi_scores)
+
+        self.unlab_gt_iou_of_rois.append(unlab_gt_iou_of_rois)
+        self.lab_gt_iou_of_rois.append(lab_gt_iou_of_rois)
 
 
     def compute(self):
         results = {}
 
-        if  len(self.batch_iou_score) >= self.reset_state_interval:
+        if  len(self.unlab_gt_iou_of_rois) >= self.reset_state_interval:
             self.iteration_count+=1
-            
-            
-            batch_cls_score = [i.clone().detach() for i in self.batch_cls_score]    
-            batch_iou_score = [i.clone().detach() for i in self.batch_iou_score]
-            batch_label = [i.clone().detach() for i in self.batch_label]
-            batch_rois = [i.clone().detach() for i in self.batch_rois]
-            batch_gts = [i.clone().detach() for i in self.batch_gts]
-            lab_iou_score = [i.clone().detach() for i in self.lab_iou_score]
-            lab_iou_label = [i.clone().detach() for i in self.lab_iou_label]
 
-            batch_cls_score = torch.cat(batch_cls_score, dim=0)
-            batch_iou_score = torch.cat(batch_iou_score, dim=0)
-            batch_label = torch.cat(batch_label, dim=0)
-            batch_rois = torch.cat(batch_rois, dim=0)
-            batch_gts = torch.cat(batch_gts, dim=0)
-            lab_iou_score = torch.cat(lab_iou_score, dim=0)
-            lab_iou_label = torch.cat(lab_iou_label, dim=0)
+            unlab_roi_labels = [i.clone().detach() for i in self.unlab_roi_labels]
+            lab_roi_labels = [i.clone().detach() for i in self.lab_roi_labels]
             
-            batch_label -= 1
-            lab_iou_label -= 1
+            unlab_roi_scores = [i.clone().detach() for i in self.unlab_roi_scores]    
+            lab_roi_scores = [i.clone().detach() for i in self.lab_roi_scores]    
+            
+            unlab_gt_iou_of_rois = [i.clone().detach() for i in self.unlab_gt_iou_of_rois]
+            lab_gt_iou_of_rois = [i.clone().detach() for i in self.lab_gt_iou_of_rois]
+
+
+            unlab_roi_labels = torch.cat(unlab_roi_labels, dim=0)
+            lab_roi_labels = torch.cat(lab_roi_labels, dim=0)
+
+            unlab_roi_scores = torch.cat(unlab_roi_scores, dim=0)
+            lab_roi_scores = torch.cat(lab_roi_scores, dim=0)
+
+            unlab_gt_iou_of_rois = torch.cat(unlab_gt_iou_of_rois, dim=0)
+            lab_gt_iou_of_rois = torch.cat(lab_gt_iou_of_rois, dim=0)
+            
+            unlab_roi_labels -= 1
+            lab_roi_labels -= 1
             
 
             cls_loc_thr = np.ones((self.num_classes), dtype=np.float32) / self.num_classes  
@@ -107,10 +110,10 @@ class AdaptiveThresholdGMM(Metric):
 
             for cind in range(self.num_classes):
                 
-                cls_mask = batch_label == cind
-                cls_score = batch_cls_score[cls_mask]
+                cls_mask = unlab_roi_labels == cind
+                cls_score = unlab_roi_scores[cls_mask]
                 cls_score = cls_score[cls_score>self.PRE_FILTERING_THRESH].cpu().numpy()
-                iou_score = batch_iou_score[cls_mask]
+                iou_score = unlab_gt_iou_of_rois[cls_mask]
                 iou_score = iou_score[iou_score>self.PRE_FILTERING_THRESH].cpu().numpy()
                 info_=f"{self.class_names[cind]} Iter {(self.iteration_count-1)*self.reset_state_interval} : {self.iteration_count*self.reset_state_interval}\n"
 
@@ -179,8 +182,8 @@ class AdaptiveThresholdGMM(Metric):
                 fig, axs = plt.subplots(1, 3, figsize=(20, 8), sharey=True)
                 for cind, class_name in self.class_names.items():
                    
-                    cls_lab_iou_score = lab_iou_score[lab_iou_label==cind]
-                    cls_unlab_iou_score = batch_iou_score[batch_label==cind]
+                    cls_lab_iou_score = lab_gt_iou_of_rois[lab_roi_labels==cind]
+                    cls_unlab_iou_score = unlab_gt_iou_of_rois[unlab_roi_labels==cind]
                     cls_lab_iou_score = cls_lab_iou_score[cls_lab_iou_score>self.PRE_FILTERING_THRESH]
                     cls_unlab_iou_score = cls_unlab_iou_score[cls_unlab_iou_score>self.PRE_FILTERING_THRESH]
 
@@ -198,22 +201,22 @@ class AdaptiveThresholdGMM(Metric):
 
                 fig.suptitle(info, fontsize='medium')
                 plt.tight_layout()
-                results['lab_unlab_dist_gmm'] = fig.get_figure()
+                results['lab_unlab_roi_iou_wrt_pl'] = fig.get_figure()
                 plt.close()
 
-                #cls_score_vs_iou_score
+                #cls_score_vs_iou_score for unlabeled data
                 fig, axs = plt.subplots(1, 3, figsize=(20, 8), sharex=True, sharey=True)
                 for cind, class_name in self.class_names.items():
 
-                    cls_mask = batch_label == cind
-                    cls_score = batch_cls_score[cls_mask]
-                    iou_score = batch_iou_score[cls_mask]
+                    cls_mask = unlab_roi_labels == cind
+                    cls_score = unlab_roi_scores[cls_mask]
+                    iou_score = unlab_gt_iou_of_rois[cls_mask]
                     cls_score = cls_score[cls_score>self.PRE_FILTERING_THRESH]
                     iou_score = iou_score[iou_score>self.PRE_FILTERING_THRESH]
                     if not cls_score.shape[0]==0:
-                        axs[cind].hist(cls_score.cpu().numpy(),  bins=bins, edgecolor='black',label='cls-score', alpha=alpha)
+                        axs[cind].hist(cls_score.cpu().numpy(),  bins=bins, edgecolor='black',label='unlab-roi-score', alpha=alpha)
                     if not iou_score.shape[0]==0:
-                        axs[cind].hist(iou_score.cpu().numpy(),  bins=bins, edgecolor='black',label='iou-score', alpha=alpha)
+                        axs[cind].hist(iou_score.cpu().numpy(),  bins=bins, edgecolor='black',label='unlab-iou-score', alpha=alpha)
                     
                     axs[cind].set_title(f'{class_name}', fontsize='x-small')
                     axs[cind].set_ylabel('Count', fontsize='x-small')
@@ -222,9 +225,33 @@ class AdaptiveThresholdGMM(Metric):
                     
                 fig.suptitle(info, fontsize='medium')
                 plt.tight_layout()
-                results["cls_score_vs_iou_score"] = fig.get_figure()
+                results["unlab_roi_vs_iou_score"] = fig.get_figure()
                 plt.close()
                 
+
+                #cls_score_vs_iou_score for labeled data
+                fig, axs = plt.subplots(1, 3, figsize=(20, 8), sharex=True, sharey=True)
+                for cind, class_name in self.class_names.items():
+
+                    cls_mask = lab_roi_labels == cind
+                    cls_score = lab_roi_scores[cls_mask]
+                    iou_score = lab_gt_iou_of_rois[cls_mask]
+                    cls_score = cls_score[cls_score>self.PRE_FILTERING_THRESH]
+                    iou_score = iou_score[iou_score>self.PRE_FILTERING_THRESH]
+                    if not cls_score.shape[0]==0:
+                        axs[cind].hist(cls_score.cpu().numpy(),  bins=bins, edgecolor='black',label='lab-roi-score', alpha=alpha)
+                    if not iou_score.shape[0]==0:
+                        axs[cind].hist(iou_score.cpu().numpy(),  bins=bins, edgecolor='black',label='lab-iou-score', alpha=alpha)
+                    
+                    axs[cind].set_title(f'{class_name}', fontsize='x-small')
+                    axs[cind].set_ylabel('Count', fontsize='x-small')
+                    axs[cind].grid(True, alpha=0.2) 
+                    axs[cind].legend(loc='upper right', bbox_to_anchor=(1, 1), fontsize='x-small')
+                    
+                fig.suptitle(info, fontsize='medium')
+                plt.tight_layout()
+                results["lab_roi_vs_iou_score"] = fig.get_figure()
+                plt.close()
                 
             self.reset()
 
