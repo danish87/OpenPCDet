@@ -174,7 +174,7 @@ MODEL:
             GMM_POLICY: high
             MU1: 0.1
             MU2: 0.9
-        METRICS_PRED_TYPES: [pred_pl, pred_gt, roi_pl_gt, adaptive_thresh_afs]
+        METRICS_PRED_TYPES: [pred_pl, pred_gt, roi_pl_gt, roi_pl_gt_adaptive_thresh]
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -205,14 +205,15 @@ MODEL:
             BOX_CODER: ResidualCoder
             ROI_PER_IMAGE: 128
             FG_RATIO: 0.5
-            ENFORCE_UNIQUE_FG_REGIONS: True    
-            UNLABELED_SAMPLER: None
-            LABELED_SAMPLER: None
+            UNLABELED_SAMPLER: default_class_agnostic_subsampler 
+            LABELED_SAMPLER: default_class_agnostic_subsampler 
             SAMPLE_ROI_BY_EACH_CLASS: True
             CLS_SCORE_TYPE: roi_iou
+            ENFORCE_UNIQUE_FG_REGIONS: False # Turn on to keep only unique FG instances (default: Disabled)
+            ENABLE_CLASSAWRAE_IOU_ASSIGNEMENT: True # only effective in case of classaware_subsampler
             UNLABELED_CLS_FG_THRESH: [0.65, 0.45, 0.4]
             UNLABELED_CLS_BG_THRESH: 0.25
-            CALIBRATED_IOUS: True
+            CALIBRATED_IOUS: True # only effective in case of classaware_subsampler
             CLS_FG_THRESH: 0.75
             CLS_BG_THRESH: 0.25
             CLS_BG_THRESH_LO: 0.1

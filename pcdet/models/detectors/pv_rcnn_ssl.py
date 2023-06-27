@@ -255,16 +255,11 @@ class PVRCNN_SSL(Detector3DTemplate):
                         if batch_index in unlabeled_inds:
                             for val, map_val in self._dict_map_.items():
                                 self.val_unlbd_dict[val].extend(eval(map_val).tolist())
-                            for tag in self.thresh_registry.tags():
-                                if tag in ['roi_iou_pl_adaptive_thresh_afs']:
-                                    base_name='afs'
-                                elif tag in ['roi_iou_pl_adaptive_thresh_bfs']:
-                                    base_name='bfs'
-                                else:
-                                    continue
-                                local_thresh = self.thresh_registry.get(tag).iou_local_thresholds.tolist()
-                                for cind, class_name in self.thresh_registry.get(tag).class_names.items():
-                                    name_ = f'{base_name}_iou_local_thresh_{class_name}'
+                            
+                            if 'roi_iou_pl_adaptive_thresh_afs' in self.thresh_registry.tags():
+                                local_thresh = self.thresh_registry.get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
+                                for cind, class_name in enumerate(self.dataset.class_names):
+                                    name_ = f'iou_local_thresh_{class_name}'
                                     if not name_ in self.val_unlbd_dict:
                                         self.val_unlbd_dict[name_]=[]
                                     cur_thr = torch.ones_like(preds_iou_max) * local_thresh[cind]

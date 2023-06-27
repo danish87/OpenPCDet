@@ -43,13 +43,16 @@ class ProposalTargetLayer(nn.Module):
         classwise_unlab_max_iou_bfs = {}
         classwise_unlab_max_iou_afs = {}
         
-        # sampling methods
+        # Sampling methods
         UNLABELED_SAMPLER = getattr(self, self.roi_sampler_cfg.UNLABELED_SAMPLER, None)
         LABELED_SAMPLER = getattr(self, self.roi_sampler_cfg.LABELED_SAMPLER, None)
+        
         # Adaptive or Fixed threshold
-        batch_dict['fg_thresh'] = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH #NOTE Default
+        batch_dict['iou_fg_thresh'] = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH 
         if 'thresh_registry' in batch_dict:
-            batch_dict['fg_thresh'] = batch_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
+            if 'roi_iou_pl_adaptive_thresh_afs' in batch_dict['thresh_registry'].tags(): 
+                    batch_dict['iou_fg_thresh'] = \
+                        batch_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
         
         
         # main loop
@@ -84,7 +87,8 @@ class ProposalTargetLayer(nn.Module):
             batch_roi_ious[index] = roi_ious
             batch_gt_of_rois[index] = cur_gt_boxes[gt_assignment[sampled_inds]]
             interval_mask[index] = cur_interval_mask
-            # Merge classwise_max_iou_bfs, classwise_max_iou_afs for each iteration
+            
+            # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
             for key, val in classwise_max_iou_bfs_batch.items():
                 if index in batch_dict['unlabeled_inds']:
                     if key not in classwise_unlab_max_iou_bfs:
@@ -132,32 +136,19 @@ class ProposalTargetLayer(nn.Module):
         cur_gt_boxes = cur_gt_boxes[:k + 1]
         cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(
             cur_gt_boxes) == 0 else cur_gt_boxes
-        
-        if not self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
-            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
-            fg_inds, bg_inds = self.subsample_rois(max_overlaps=max_overlaps)
-            sampled_inds = torch.cat((fg_inds, bg_inds), dim=0)
-            
-        else:
+
+        if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
             max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
                 rois=cur_roi, roi_labels=cur_roi_labels,
                 gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long())
-            fg_inds, bg_inds = self.subsample_rois(max_overlaps=max_overlaps)
-            sampled_inds = torch.cat((fg_inds, bg_inds), dim=0)
+                
+        else:
+            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
+            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
 
-            # accumulate classwise samples for 
-            for cind in range(3):
-                roi_mask = (cur_roi_labels == (cind+1))
-                cur_max_overlaps = max_overlaps[roi_mask]
-                # before subsampling
-                classwise_max_iou_bfs[cind] = torch.cat([cur_max_overlaps, 
-                                                                cur_max_overlaps.new_full((cur_roi.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0   
-                # after subsampling
-                roi_mask = (cur_roi_labels[sampled_inds] == (cind+1))
-                cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
-                classwise_max_iou_afs[cind] = torch.cat([cur_max_overlaps, 
-                                                                cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0
+        fg_inds, bg_inds = self.subsample_rois(max_overlaps=max_overlaps)
+        sampled_inds = torch.cat((fg_inds, bg_inds), dim=0)
+            
 
         roi_ious = max_overlaps[sampled_inds]
         
@@ -174,13 +165,25 @@ class ProposalTargetLayer(nn.Module):
 
         cls_labels[interval_mask] = \
             (roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)
+        
+        # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
+        for cind in range(3):
+            roi_mask = (cur_roi_labels == (cind+1))
+            cur_max_overlaps = max_overlaps[roi_mask]
+            # before subsampling
+            classwise_max_iou_bfs[cind] = torch.cat([cur_max_overlaps, 
+                                                            cur_max_overlaps.new_full((cur_roi.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0   
+            # after subsampling
+            roi_mask = (cur_roi_labels[sampled_inds] == (cind+1))
+            cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
+            classwise_max_iou_afs[cind] = torch.cat([cur_max_overlaps, 
+                                                            cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0
 
         return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask, classwise_max_iou_bfs, classwise_max_iou_afs
     
     def classaware_subsampler(self, batch_dict, index):
-        #assert self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False), "SAMPLE_ROI_BY_EACH_CLASS Should be enabled"
-        # get dynamic or fixed thresh
-        fg_thresh = batch_dict['fg_thresh']
+
+        iou_fg_thresh = batch_dict['iou_fg_thresh']
         cur_roi = batch_dict['rois'][index]
         cur_gt_boxes = batch_dict['gt_boxes'][index]
         cur_roi_labels = batch_dict['roi_labels'][index]
@@ -195,49 +198,95 @@ class ProposalTargetLayer(nn.Module):
             cur_gt_boxes) == 0 else cur_gt_boxes
             
 
-        max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+        if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
+            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
                 rois=cur_roi, roi_labels=cur_roi_labels,
                 gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long())
+                
+        else:
+            iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt_boxes[:, 0:7])  # (M, N)
+            max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
+            
         
-        # from class agnostic subsampling take only FG, FG_RATIO=1, ROI_PER_IMAGE is half
-        fg_inds_class_agno, bg_inds_class_agno = self.subsample_rois(max_overlaps= max_overlaps, 
-                                                                    ROI_PER_IMAGE=self.roi_sampler_cfg.ROI_PER_IMAGE // 2, 
-                                                                    FG_RATIO=1)
-
-        # class aware subsampling
+        # -------------------- class aware subsampling-----------------------------------------------------#
         fg_inds_class_aw, bg_inds_class_aw = [], []
         for cind in range(3):
             roi_mask = (cur_roi_labels == (cind + 1))
+            if not roi_mask.sum(): continue
             cur_max_overlaps = max_overlaps[roi_mask]
             fg_inds, bg_inds = self.subsample_rois(max_overlaps= cur_max_overlaps,
-                                                   ROI_PER_IMAGE=self.roi_sampler_cfg.ROI_PER_IMAGE // 2, 
-                                                   CLS_FG_THRESH=fg_thresh[cind])
+                                                    CLS_FG_THRESH=iou_fg_thresh[cind])
             fg_inds_class_aw.append(fg_inds) 
             bg_inds_class_aw.append(bg_inds)
     
+        
+        
+        # FG
         fg_rois_per_image = int(np.round(self.roi_sampler_cfg.FG_RATIO * self.roi_sampler_cfg.ROI_PER_IMAGE))
-        fg_inds_all = torch.cat([fg_inds_class_agno] + fg_inds_class_aw, dim=0)
-
+        fg_inds_all = torch.cat(fg_inds_class_aw, dim=0)  # NOTE: class aware is considered only
+        
+        # There are FGs with repetion, turn on to keep only unique instances (default: Disabled)
         if self.roi_sampler_cfg.get("ENFORCE_UNIQUE_FG_REGIONS", False):
             fg_inds_all = torch.unique(fg_inds_all)
 
-        # limit using max_overlaps
+        # discard samples if exceeds limit using max_overlaps
         if len(fg_inds_all) > fg_rois_per_image:
             sorted_fg_inds = fg_inds_all[torch.argsort(max_overlaps[fg_inds_all], descending=True)]
             fg_inds_all = sorted_fg_inds[:fg_rois_per_image]
 
+        # BG
         bg_rois_per_image = self.roi_sampler_cfg.ROI_PER_IMAGE - len(fg_inds_all)
+
         bg_inds_all = torch.cat(bg_inds_class_aw, dim=0) # NOTE: class aware is considered only
-        # limit using max_overlaps
+        # discard samples if exceeds limit using max_overlaps
         if len(bg_inds_all) > bg_rois_per_image:
             sorted_bg_inds = bg_inds_all[torch.argsort(max_overlaps[bg_inds_all], descending=True)]
             bg_inds_all = sorted_bg_inds[:bg_rois_per_image]
 
 
         sampled_inds = torch.cat((fg_inds_all, bg_inds_all), dim=0)[:self.roi_sampler_cfg.ROI_PER_IMAGE]
+        # ------------------------------------------------------------------------------------------------#
 
 
-        # accumulate classwise samples for 
+        roi_ious = max_overlaps[sampled_inds]
+        reg_valid_mask = (roi_ious > self.roi_sampler_cfg.REG_FG_THRESH).long()         # regression valid mask
+        iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
+
+        
+        if self.roi_sampler_cfg.get("ENABLE_CLASSAWRAE_IOU_ASSIGNEMENT", False):
+            # ------- class-aware label assignment, could be fixed or adaptive -----------------------------#
+            
+            cls_labels = torch.zeros_like(roi_ious)
+            interval_mask = torch.zeros_like(roi_ious, dtype=bool)
+            ignore_mask = torch.eq(roi_ious, 0).all(dim=-1)
+            cls_labels[ignore_mask] = -1
+            
+            for cind in range(3):
+                classwise_mask = cur_roi_labels[sampled_inds] == (cind+1)
+                classwise_roi_ious = roi_ious[classwise_mask]
+                fg_mask = classwise_roi_ious > iou_fg_thresh[cind]
+                bg_mask = classwise_roi_ious < iou_bg_thresh
+                interval_mask[classwise_mask] = (fg_mask == 0) & (bg_mask == 0)
+                cls_labels[classwise_mask] = (fg_mask > 0).float()
+                
+                if self.roi_sampler_cfg.get("CALIBRATED_IOUS", False):
+                    cls_labels[classwise_mask][interval_mask[classwise_mask]] = \
+                        (classwise_roi_ious[interval_mask[classwise_mask]] - iou_bg_thresh) / (iou_fg_thresh[cind] - iou_bg_thresh)
+        else:
+            # ---------------------- default roi_iou based assignement ------------------
+
+            iou_fg_thresh = self.roi_sampler_cfg.CLS_FG_THRESH
+            fg_mask = roi_ious > iou_fg_thresh
+            bg_mask = roi_ious < iou_bg_thresh
+            interval_mask = (fg_mask == 0) & (bg_mask == 0)
+            cls_labels = (fg_mask > 0).float()
+
+            cls_labels[interval_mask] = \
+                (roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)                
+        
+                
+
+        # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
         for cind in range(3):
             roi_mask = (cur_roi_labels == (cind+1))
             cur_max_overlaps = max_overlaps[roi_mask]
@@ -249,34 +298,10 @@ class ProposalTargetLayer(nn.Module):
             cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
             classwise_max_iou_afs[cind] = torch.cat([cur_max_overlaps, 
                                                             cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)]) # padded with -1 to keep 0
-                
-        
-
-        # class-aware label assignment
-        roi_ious = max_overlaps[sampled_inds]
-        cls_labels = torch.zeros_like(roi_ious)
-        interval_mask = torch.zeros_like(roi_ious, dtype=bool)
-        ignore_mask = torch.eq(roi_ious, 0).all(dim=-1)
-        cls_labels[ignore_mask] = -1
-        # regression valid mask
-        reg_valid_mask = (roi_ious > self.roi_sampler_cfg.REG_FG_THRESH).long()
-        iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
-        
-        # ----------- Dynamic FG/BG thresholding -----------
-        for cind in range(3):
-            classwise_mask = cur_roi_labels[sampled_inds] == (cind+1)
-            classwise_roi_ious = roi_ious[classwise_mask]
-            # classification label
-            fg_mask = classwise_roi_ious > fg_thresh[cind]
-            bg_mask = classwise_roi_ious < iou_bg_thresh
-            interval_mask[classwise_mask] = (fg_mask == 0) & (bg_mask == 0)
-            cls_labels[classwise_mask] = (fg_mask > 0).float()
-            if self.roi_sampler_cfg.get("CALIBRATED_IOUS", False):
-                cls_labels[classwise_mask][interval_mask[classwise_mask]] = \
-                    (classwise_roi_ious[interval_mask[classwise_mask]] - iou_bg_thresh) / (fg_thresh[cind] - iou_bg_thresh)
-                
 
         return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask, classwise_max_iou_bfs, classwise_max_iou_afs
+    
+
     
     def subsample_rois(self, max_overlaps, 
                     FG_RATIO=None, 

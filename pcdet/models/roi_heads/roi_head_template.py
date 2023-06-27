@@ -196,45 +196,28 @@ class RoIHeadTemplate(nn.Module):
                                      'pred_weights': sample_pred_weights}
             metrics_pred_pl.update(**metric_inputs_pred_pl)
         if 'roi_pl_gt' in pred_type:
-            roi_iou_pl_dynamic_thresh=None
             tag = f'rcnn_roi_pl_gt_metrics_{mask_type}_default'
             metrics = metric_registry.get(tag)
             metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
                              'ground_truths': sample_gts, 'targets': sample_targets,
                              'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
                              'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
-                             'pred_iou_wrt_pl': sample_gt_iou_of_rois, 
-                             'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}
+                             'pred_iou_wrt_pl': sample_gt_iou_of_rois}
             metrics.update(**metric_inputs)
 
-        if 'adaptive_thresh_afs' in pred_type:
-            roi_iou_pl_dynamic_thresh=None
-            if 'thresh_registry' in self.forward_ret_dict:
-                roi_iou_pl_dynamic_thresh = self.forward_ret_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
-            
-            tag = f'rcnn_roi_pl_gt_metrics_{mask_type}_afs_adaptive_thr'
-            metrics = metric_registry.get(tag)
-            metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
-                             'ground_truths': sample_gts, 'targets': sample_targets,
-                             'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
-                             'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
-                             'pred_iou_wrt_pl': sample_gt_iou_of_rois, 
-                             'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}
-        
-        if 'adaptive_thresh_bfs' in pred_type:
-            roi_iou_pl_dynamic_thresh=None
-            if 'thresh_registry' in self.forward_ret_dict:
-                roi_iou_pl_dynamic_thresh = self.forward_ret_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh_bfs').iou_local_thresholds.tolist()
-            
-            tag = f'rcnn_roi_pl_gt_metrics_{mask_type}_bfs_adaptive_thr'
-            metrics = metric_registry.get(tag)
-            metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
-                             'ground_truths': sample_gts, 'targets': sample_targets,
-                             'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
-                             'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
-                             'pred_iou_wrt_pl': sample_gt_iou_of_rois, 
-                             'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}            
-            metrics.update(**metric_inputs)
+        if 'roi_pl_gt_adaptive_thresh' in pred_type:
+            if 'thresh_registry' in targets_dict:
+                if 'roi_iou_pl_adaptive_thresh_afs' in targets_dict['thresh_registry'].tags(): 
+                    roi_iou_pl_dynamic_thresh = targets_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
+                    tag = f'rcnn_roi_pl_gt_metrics_{mask_type}_adaptive_thr'
+                    metrics = metric_registry.get(tag)
+                    metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
+                                    'ground_truths': sample_gts, 'targets': sample_targets,
+                                    'pseudo_labels': sample_pls, 'pseudo_label_scores': sample_pl_scores,
+                                    'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
+                                    'pred_iou_wrt_pl': sample_gt_iou_of_rois, 
+                                    'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}      
+                    metrics.update(**metric_inputs)
             
     def assign_targets(self, batch_dict):
         batch_size = batch_dict['batch_size']
@@ -487,9 +470,7 @@ class RoIHeadTemplate(nn.Module):
         
         if 'thresh_registry' not in data_dict: return
         thresh_registry = data_dict['thresh_registry']
-        
-        
-        adaptive_thresh = thresh_registry.get(tag)
+        adaptive_thresh = thresh_registry.get(tag) # NOTE Initialisation of threshold is after first subsampling step
     
         unlabeled_inds = data_dict['unlabeled_inds'] if 'unlabeled_inds' in data_dict else torch.tensor([], device=data_dict['roi_labels'].device)
         labeled_inds=torch.tensor([i for i in range(data_dict['roi_labels'].shape[0]) if i not in unlabeled_inds], device=data_dict['roi_labels'].device)
