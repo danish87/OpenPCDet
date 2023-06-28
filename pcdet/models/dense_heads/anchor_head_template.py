@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from ...utils import box_coder_utils, common_utils, loss_utils
 from .target_assigner.anchor_generator import AnchorGenerator
@@ -71,9 +72,11 @@ class AnchorHeadTemplate(nn.Module):
         return target_assigner
 
     def build_losses(self, losses_cfg):
+        alpha_focal = losses_cfg.get('ALPHA_FOCAL', 0.25)
+        gamma_focal = losses_cfg.get('GAMMA_FOCAL', 2.0)
         self.add_module(
             'cls_loss_func',
-            loss_utils.SigmoidFocalClassificationLoss(alpha=0.25, gamma=2.0)
+            loss_utils.SigmoidFocalClassificationLoss(alpha=alpha_focal, gamma=gamma_focal)
         )
         reg_loss_name = 'WeightedSmoothL1Loss' if losses_cfg.get('REG_LOSS_TYPE', None) is None \
             else losses_cfg.REG_LOSS_TYPE
@@ -231,12 +234,13 @@ class AnchorHeadTemplate(nn.Module):
 
         return box_loss, tb_dict
 
-    def calc_entropy(self,lambda_=0.75):
-        pred_scores = self.forward_ret_dict['cls_preds']
-        pred_scores = pred_scores.view(int(pred_scores.shape[0]), -1) # [batch, num_anchors x self.num_class]
-        pred_scores=torch.sigmoid(pred_scores)
-        return -lambda_ * torch.sum(pred_scores * (torch.log(pred_scores + 1e-5)), 1)
+    def calc_entropy(self):
+        pred_scores = self.forward_ret_dict['cls_preds'].view(-1, self.num_class)  # [batch-size x num_anchors, num_class]
+        p = F.softmax(pred_scores, dim=1)
+        elementwise_entropy = - p * F.log_softmax(pred_scores, dim=1)
+        return torch.sum(elementwise_entropy, dim=-1).mean()
     
+
     def get_loss(self, scalar=True):
         cls_loss, tb_dict = self.get_cls_layer_loss(scalar=scalar)
         box_loss, tb_dict_box = self.get_box_reg_layer_loss(scalar=scalar)

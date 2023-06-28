@@ -1,8 +1,8 @@
 import os
-
+import pickle
 import torch
 import copy
-
+from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from pcdet.datasets.augmentor import augmentor_utils 
 from .detector3d_template import Detector3DTemplate
 from.pv_rcnn import PVRCNN
@@ -56,6 +56,18 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
+
+        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'iteration','roi_labels', 'roi_scores']
+        self.val_lbd_dict = {val: [] for val in vals_to_store}
+        self.val_unlbd_dict = {val: [] for val in vals_to_store}
+        self._dict_map_ = {
+                'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
+                'iou_roi_gt': 'preds_iou_max',
+                'pred_scores': 'batch_pred_score[batch_index]',
+                'iteration': 'cur_iteration',
+                'roi_labels': 'batch_roi_labels[batch_index]',
+                'roi_scores': 'batch_roi_score[batch_index]'
+            }
 
     def forward(self, batch_dict):
         if self.training:
@@ -150,25 +162,19 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             # RCNN Entropy Regularization
             if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RCNN_ENTROPY_REG", False):
-                entropy =self.pv_rcnn.roi_head.calc_entropy(
-                    lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RCNN_ENTROPY_REG_LAMBDA", 0.25)
-                    )
-                rcnn_unlbd_entropy=entropy[unlabeled_inds, ...].mean()
-                rcnn_lbd_entropy=entropy[labeled_inds, ...].mean()
-                tb_dict['rcnn_lbd_entropy'] = rcnn_lbd_entropy
-                tb_dict['rcnn_unlbd_entropy'] = rcnn_unlbd_entropy
-                loss+= rcnn_unlbd_entropy #+ rcnn_lbd_entropy
+                lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RCNN_ENTROPY_REG_LAMBDA", 1.0)
+                rcnn_entropy = lambda_ * self.pv_rcnn.roi_head.calc_entropy()
+                tb_dict['rcnn_entropy'] = rcnn_entropy
+                loss+= rcnn_entropy
 
             # RPN Entropy Regularization    
             if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RPN_ENTROPY_REG", False):
-                entropy =self.pv_rcnn.dense_head.calc_entropy(
-                    lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RPN_ENTROPY_REG_LAMBDA", 0.005)
-                    )
-                rpn_unlbd_entropy=entropy[unlabeled_inds, ...].mean()
-                rpn_lbd_entropy=entropy[labeled_inds, ...].mean()
-                tb_dict['rpn_lbd_entropy'] = rpn_lbd_entropy
-                tb_dict['rpn_unlbd_entropy'] = rpn_unlbd_entropy
-                loss+= rpn_unlbd_entropy #+ rpn_lbd_entropy
+                lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RPN_ENTROPY_REG_LAMBDA", 1.0)
+                rpn_entropy = lambda_ * self.pv_rcnn.dense_head.calc_entropy()
+                tb_dict['rpn_entropy'] = rpn_entropy
+                loss+= rpn_entropy # overall reduction in the average uncertainty across all classes
+
+
 
 
             tb_dict_ = {}
@@ -185,6 +191,84 @@ class PVRCNN_SSL(Detector3DTemplate):
                 else:
                     tb_dict_[key] = tb_dict[key]
 
+
+            if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
+                # iter wise
+                for tag_ in ['classwise_unlab_max_iou_bfs', 'classwise_unlab_max_iou_afs', 'classwise_lab_max_iou_bfs', 'classwise_lab_max_iou_afs']:
+                    iter_name_ =  f'{tag_}_iteration'
+                    if not (tag_ in self.pv_rcnn.roi_head.forward_ret_dict and self.pv_rcnn.roi_head.forward_ret_dict[tag_]): continue
+                    cur_iteration = torch.ones_like(self.pv_rcnn.roi_head.forward_ret_dict[tag_][0]) * (batch_dict['cur_iteration'])
+                    if 'unlab' in tag_:
+                        if not iter_name_ in self.val_unlbd_dict:
+                            self.val_unlbd_dict[iter_name_]=[]
+                        self.val_unlbd_dict[iter_name_].extend(cur_iteration.tolist())
+                    else:
+                        if not iter_name_ in self.val_lbd_dict:
+                            self.val_lbd_dict[iter_name_]=[]
+                        self.val_lbd_dict[iter_name_].extend(cur_iteration.tolist())
+
+                    for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_].items():
+                        name_ = f'{tag_}_{self.dataset.class_names[key]}'
+                        if 'unlab' in tag_:
+                            if not name_ in self.val_unlbd_dict:
+                                self.val_unlbd_dict[name_]=[]
+                            self.val_unlbd_dict[name_].extend(val.tolist())
+                        else:
+                            if not name_ in self.val_lbd_dict:
+                                self.val_lbd_dict[name_]=[]
+                            self.val_lbd_dict[name_].extend(val.tolist())
+                
+                # batch wise
+                batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].detach().clone()
+                batch_rois = self.pv_rcnn.roi_head.forward_ret_dict['rois'].detach().clone()
+                batch_ori_gt_boxes = self.pv_rcnn.roi_head.forward_ret_dict['ori_gt_boxes'].detach().clone()
+                batch_iou_roi_pl = self.pv_rcnn.roi_head.forward_ret_dict['gt_iou_of_rois'].detach().clone()
+                batch_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).detach().clone().squeeze()
+                batch_roi_score =  torch.sigmoid(self.pv_rcnn.roi_head.forward_ret_dict['roi_scores']).detach().clone()
+
+                for batch_index in range(len(batch_rois)):
+                    valid_rois_mask = torch.logical_not(torch.all(batch_rois[batch_index] == 0, dim=-1))
+                    valid_rois = batch_rois[batch_index][valid_rois_mask]
+                    valid_roi_labels = batch_roi_labels[batch_index][valid_rois_mask]
+                    valid_roi_labels -= 1  
+
+                    valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[batch_index] == 0, dim=-1))
+                    valid_gt_boxes = batch_ori_gt_boxes[batch_index][valid_gt_boxes_mask]
+                    valid_gt_boxes[:, -1] -= 1  
+
+                    num_gts = valid_gt_boxes_mask.sum()
+                    num_preds = valid_rois_mask.sum()
+
+                    if num_gts > 0 and num_preds > 0:
+                        overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
+                        preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                        cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
+                        if batch_index in unlabeled_inds:
+                            for val, map_val in self._dict_map_.items():
+                                self.val_unlbd_dict[val].extend(eval(map_val).tolist())
+                            
+                            if 'roi_iou_pl_adaptive_thresh_afs' in self.thresh_registry.tags():
+                                local_thresh = self.thresh_registry.get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
+                                for cind, class_name in enumerate(self.dataset.class_names):
+                                    name_ = f'iou_local_thresh_{class_name}'
+                                    if not name_ in self.val_unlbd_dict:
+                                        self.val_unlbd_dict[name_]=[]
+                                    cur_thr = torch.ones_like(preds_iou_max) * local_thresh[cind]
+                                    self.val_unlbd_dict[name_].extend(cur_thr.tolist())
+                        else:
+                            for val, map_val in self._dict_map_.items():
+                                self.val_lbd_dict[val].extend(eval(map_val).tolist())
+                
+                # print([(k,len(v)) for k, v in self.val_lbd_dict.items() if len(v) ])
+                # print([(k,len(v)) for k, v in self.val_unlbd_dict.items() if len(v) ])
+                
+                # replace old pickle data (if exists) with updated one 
+                output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                pickle.dump(self.val_lbd_dict, open(os.path.join(output_dir, 'scores_lbd.pkl'), 'wb'))
+                pickle.dump(self.val_unlbd_dict, open(os.path.join(output_dir, 'scores_unlbd.pkl'), 'wb'))
+
+           
+            # update eval metric results
             for key in self.metric_registry.tags():
                 metrics = self.compute_metrics(tag=key)
                 tb_dict_.update(metrics)

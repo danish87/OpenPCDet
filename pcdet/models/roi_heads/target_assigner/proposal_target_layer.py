@@ -29,7 +29,9 @@ class ProposalTargetLayer(nn.Module):
                 reg_valid_mask: (B, M)
                 rcnn_cls_labels: (B, M)
         """
-        batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels = self.sample_rois_for_rcnn(
+        (batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, \
+         classwise_lab_max_iou_bfs, classwise_lab_max_iou_afs, \
+            classwise_unlab_max_iou_bfs, classwise_unlab_max_iou_afs) = self.sample_rois_for_rcnn(
             batch_dict=batch_dict
         )
         # regression valid mask
@@ -57,7 +59,11 @@ class ProposalTargetLayer(nn.Module):
         targets_dict = {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
                         'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
                         'reg_valid_mask': reg_valid_mask,
-                        'rcnn_cls_labels': batch_cls_labels}
+                        'rcnn_cls_labels': batch_cls_labels,
+                        'classwise_unlab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_bfs.items()}, 
+                        'classwise_unlab_max_iou_afs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_afs.items()},
+                        'classwise_lab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_lab_max_iou_bfs.items()}, 
+                        'classwise_lab_max_iou_afs': {k: torch.stack(v) for k, v in classwise_lab_max_iou_afs.items()}}
 
         return targets_dict
 
@@ -78,7 +84,10 @@ class ProposalTargetLayer(nn.Module):
         roi_scores = batch_dict['roi_scores']
         roi_labels = batch_dict['roi_labels']
         gt_boxes = batch_dict['gt_boxes']
-
+        classwise_lab_max_iou_bfs = {}
+        classwise_lab_max_iou_afs = {}
+        classwise_unlab_max_iou_bfs = {}
+        classwise_unlab_max_iou_afs = {}
         code_size = rois.shape[-1]
         batch_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size)
         batch_gt_of_rois = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, code_size + 1)
@@ -112,7 +121,41 @@ class ProposalTargetLayer(nn.Module):
             batch_roi_scores[index] = cur_roi_scores[sampled_inds]
             batch_gt_of_rois[index] = cur_gt[gt_assignment[sampled_inds]]
 
-        return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels
+            # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
+            for cind in range(3):
+                roi_mask = (cur_roi_labels == (cind+1))
+                cur_max_overlaps = max_overlaps[roi_mask]
+                cur_max_overlaps_bfs = torch.cat([cur_max_overlaps, cur_max_overlaps.new_full((cur_roi.shape[0] - 
+                                                                        cur_max_overlaps.shape[0],), -1)])
+                
+                roi_mask = (cur_roi_labels[sampled_inds] == (cind+1))
+                cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
+                cur_max_overlaps_afs = torch.cat([cur_max_overlaps, 
+                                        cur_max_overlaps.new_full((sampled_inds.shape[0] - 
+                                                                        cur_max_overlaps.shape[0],), -1)])
+                # before and after subsampling
+                if 'unlabeled_inds' in batch_dict and index in batch_dict['unlabeled_inds']:
+                    if cind not in classwise_unlab_max_iou_bfs:
+                        classwise_unlab_max_iou_bfs[cind] = []
+                    classwise_unlab_max_iou_bfs[cind].extend(cur_max_overlaps_bfs)
+
+                    if cind not in classwise_unlab_max_iou_afs:
+                        classwise_unlab_max_iou_afs[cind] = []
+                    classwise_unlab_max_iou_afs[cind].extend(cur_max_overlaps_afs)
+                else:
+                    if cind not in classwise_lab_max_iou_bfs:
+                        classwise_lab_max_iou_bfs[cind] = []
+                    classwise_lab_max_iou_bfs[cind].extend(cur_max_overlaps_bfs)
+                    
+                    if cind not in classwise_lab_max_iou_afs:
+                        classwise_lab_max_iou_afs[cind] = []
+                    classwise_lab_max_iou_afs[cind].extend(cur_max_overlaps_afs)
+                
+
+
+        return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, \
+                    classwise_lab_max_iou_bfs, classwise_lab_max_iou_afs, \
+                    classwise_unlab_max_iou_bfs, classwise_unlab_max_iou_afs
 
     def subsample_rois(self, max_overlaps):
         # sample fg, easy_bg, hard_bg

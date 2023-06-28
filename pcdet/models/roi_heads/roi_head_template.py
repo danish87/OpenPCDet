@@ -114,43 +114,6 @@ class RoIHeadTemplate(nn.Module):
         sample_gts = []
         sample_gt_iou_of_rois = []
 
-        if 'gt_boxes' in targets_dict: # pretraining stage
-            
-            #['rois', 'gt_of_rois', 'gt_iou_of_rois', 'roi_scores', 'roi_labels', 'reg_valid_mask', 'rcnn_cls_labels', 'gt_of_rois_src', 'batch_box_preds', 'rcnn_cls', 'rcnn_reg']
-            for ind in range(targets_dict['roi_labels'].shape[0]):
-                mask = targets_dict['rcnn_cls_labels'][ind] >= 0
-                # (Proposals) ROI info
-                rois = targets_dict['rois'][ind][mask].detach().clone()
-                roi_labels = targets_dict['roi_labels'][ind][mask].unsqueeze(-1).detach().clone()
-                roi_scores = torch.sigmoid(targets_dict['roi_scores'])[ind][mask].detach().clone()
-                roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
-                gt_iou_of_rois = targets_dict['gt_iou_of_rois'][ind][mask].unsqueeze(-1).detach().clone()
-                sample_rois.append(roi_labeled_boxes)
-                sample_roi_scores.append(roi_scores)
-                sample_gt_iou_of_rois.append(gt_iou_of_rois)
-                # Target info
-                target_labeled_boxes = targets_dict['gt_of_rois_src'][ind][mask].detach().clone()
-                target_scores = targets_dict['rcnn_cls_labels'][ind][mask].detach().clone()
-                sample_targets.append(target_labeled_boxes)
-                sample_target_scores.append(target_scores)
-
-                # Pred info
-                pred_boxes = targets_dict['batch_box_preds'][ind][mask].detach().clone()
-                pred_scores = torch.sigmoid(targets_dict['rcnn_cls']).view_as(targets_dict['rcnn_cls_labels'])[ind][mask].detach().clone()
-                pred_labeled_boxes = torch.cat([pred_boxes, roi_labels], dim=-1)
-                sample_preds.append(pred_labeled_boxes)
-                sample_pred_scores.append(pred_scores)
-
-                # (Real labels) GT info
-                gt_labeled_boxes = targets_dict['gt_boxes'][ind]
-                sample_gts.append(gt_labeled_boxes)
-
-                # (Pseudo labels) PL info
-                # pl_labeled_boxes = targets_dict['pl_boxes'][uind]
-                # pl_scores = targets_dict['pl_scores'][i]
-                # sample_pls.append(pl_labeled_boxes)
-                # sample_pl_scores.append(pl_scores)
-
         if 'ori_unlabeled_boxes' in targets_dict:
             unlabeled_inds = targets_dict['unlabeled_inds']
             for i, uind in enumerate(unlabeled_inds):
@@ -199,6 +162,43 @@ class RoIHeadTemplate(nn.Module):
                 if self.model_cfg.get('ENABLE_SOFT_TEACHER', False):
                     pred_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
                     sample_pred_weights.append(pred_weights)
+
+        else: # pretraining stage
+            #['rois', 'gt_of_rois', 'gt_iou_of_rois', 'roi_scores', 'roi_labels', 'reg_valid_mask', 'rcnn_cls_labels', 'gt_of_rois_src', 'batch_box_preds', 'rcnn_cls', 'rcnn_reg']
+            for ind in range(targets_dict['roi_labels'].shape[0]):
+                mask = targets_dict['rcnn_cls_labels'][ind] >= 0
+                # (Proposals) ROI info
+                rois = targets_dict['rois'][ind][mask].detach().clone()
+                roi_labels = targets_dict['roi_labels'][ind][mask].unsqueeze(-1).detach().clone()
+                roi_scores = torch.sigmoid(targets_dict['roi_scores'])[ind][mask].detach().clone()
+                roi_labeled_boxes = torch.cat([rois, roi_labels], dim=-1)
+                gt_iou_of_rois = targets_dict['gt_iou_of_rois'][ind][mask].unsqueeze(-1).detach().clone()
+                sample_rois.append(roi_labeled_boxes)
+                sample_roi_scores.append(roi_scores)
+                sample_gt_iou_of_rois.append(gt_iou_of_rois)
+                # Target info
+                target_labeled_boxes = targets_dict['gt_of_rois_src'][ind][mask].detach().clone()
+                target_scores = targets_dict['rcnn_cls_labels'][ind][mask].detach().clone()
+                sample_targets.append(target_labeled_boxes)
+                sample_target_scores.append(target_scores)
+
+                # Pred info
+                pred_boxes = targets_dict['batch_box_preds'][ind][mask].detach().clone()
+                pred_scores = torch.sigmoid(targets_dict['rcnn_cls']).view_as(targets_dict['rcnn_cls_labels'])[ind][mask].detach().clone()
+                pred_labeled_boxes = torch.cat([pred_boxes, roi_labels], dim=-1)
+                sample_preds.append(pred_labeled_boxes)
+                sample_pred_scores.append(pred_scores)
+
+                # (Real labels) GT info
+                gt_labeled_boxes = targets_dict['gt_boxes'][ind]
+                sample_gts.append(gt_labeled_boxes)
+
+                # (Pseudo labels) PL info
+                # pl_labeled_boxes = targets_dict['pl_boxes'][uind]
+                # pl_scores = targets_dict['pl_scores'][i]
+                # sample_pls.append(pl_labeled_boxes)
+                # sample_pl_scores.append(pl_scores)
+
 
         sample_pred_weights = sample_pred_weights if len(sample_pred_weights) > 0 else None
 
@@ -399,11 +399,11 @@ class RoIHeadTemplate(nn.Module):
         }
         return rcnn_loss_cls, tb_dict
 
-    def calc_entropy(self,lambda_=0.75):
-        pred_scores = self.forward_ret_dict['rcnn_cls']
-        pred_scores = pred_scores.view_as(self.forward_ret_dict['rcnn_cls_labels'])
-        pred_scores = torch.sigmoid(pred_scores)
-        return -lambda_ * torch.sum(pred_scores * (torch.log(pred_scores + 1e-5)), 1)
+    def calc_entropy(self):
+        pred_scores = self.forward_ret_dict['rcnn_cls'].squeeze()
+        elementwise_entropy = -F.softmax(pred_scores, dim=-1) * F.log_softmax(pred_scores, dim=-1)
+        return torch.sum(elementwise_entropy)
+
 
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict

@@ -102,6 +102,8 @@ MODEL:
             BOX_CODER: ResidualCoder
 
         LOSS_CONFIG:
+            ALPHA_FOCAL: 0.25
+            GAMMA_FOCAL: 2.0
             LOSS_WEIGHTS: {
                 'cls_weight': 1.0,
                 'loc_weight': 2.0,
@@ -159,7 +161,7 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
-        ENABLE_EVAL: True
+        ENABLE_EVAL: False
         METRICS_PRED_TYPES: [pred_gt]
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
@@ -207,9 +209,9 @@ MODEL:
             CLS_LOSS: BinaryCrossEntropy
             REG_LOSS: smooth-l1
             ENABLE_RCNN_ENTROPY_REG: False
-            RCNN_ENTROPY_REG_LAMBDA: 0.25
+            RCNN_ENTROPY_REG_LAMBDA: 1.0
             ENABLE_RPN_ENTROPY_REG: False
-            RPN_ENTROPY_REG_LAMBDA: 0.005
+            RPN_ENTROPY_REG_LAMBDA: 1.0
             CORNER_LOSS_REGULARIZATION: True
             LOSS_WEIGHTS: {
                 'rcnn_cls_weight': 1.0,
@@ -231,6 +233,8 @@ MODEL:
             NMS_THRESH: 0.1
             NMS_PRE_MAXSIZE: 4096
             NMS_POST_MAXSIZE: 500
+
+    STORE_SCORES_IN_PKL: False
 
 
 OPTIMIZATION:
