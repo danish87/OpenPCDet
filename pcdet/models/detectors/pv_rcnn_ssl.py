@@ -95,7 +95,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pred_dicts, recall_dicts = self.pv_rcnn_ema.post_processing(batch_dict_ema,
                                                                             no_recall_dict=True, override_thresh=0.0, no_nms=self.no_nms)
             # Used for calc stats before and after filtering
-            ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+            ori_gt_boxes = batch_dict['gt_boxes']
             
             """PL metrics before filtering"""
             if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
@@ -113,7 +113,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             if self.model_cfg.ROI_HEAD.get("ENABLE_EVAL", False):
                 if 'pl_gt_metrics_after_filtering' in self.model_cfg.ROI_HEAD.METRICS_PRED_TYPES:
 
-                    ori_unlabeled_boxes_list = [ori_box for ori_box in ori_unlabeled_boxes]
+                    ori_unlabeled_boxes_list = [ori_box for ori_box in ori_gt_boxes[unlabeled_inds, ...]]
                     pseudo_boxes_list = [ps_box for ps_box in batch_dict['gt_boxes'][unlabeled_inds]]
                     metric_inputs = {'preds': pseudo_boxes_list, 'pred_scores': pseudo_scores, 'roi_scores': pseudo_sem_scores,
                              'ground_truths': ori_unlabeled_boxes_list}
@@ -124,8 +124,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
 
             batch_dict['metric_registry'] = self.metric_registry
-            batch_dict['ori_unlabeled_boxes'] = ori_unlabeled_boxes
-
+            batch_dict['ori_gt_boxes'] = ori_gt_boxes
             # run original student using PLs
             for cur_module in self.pv_rcnn.module_list:
                 batch_dict = cur_module(batch_dict)
@@ -246,15 +245,6 @@ class PVRCNN_SSL(Detector3DTemplate):
                         if batch_index in unlabeled_inds:
                             for val, map_val in self._dict_map_.items():
                                 self.val_unlbd_dict[val].extend(eval(map_val).tolist())
-                            
-                            if 'roi_iou_pl_adaptive_thresh_afs' in self.thresh_registry.tags():
-                                local_thresh = self.thresh_registry.get(tag='roi_iou_pl_adaptive_thresh_afs').iou_local_thresholds.tolist()
-                                for cind, class_name in enumerate(self.dataset.class_names):
-                                    name_ = f'iou_local_thresh_{class_name}'
-                                    if not name_ in self.val_unlbd_dict:
-                                        self.val_unlbd_dict[name_]=[]
-                                    cur_thr = torch.ones_like(preds_iou_max) * local_thresh[cind]
-                                    self.val_unlbd_dict[name_].extend(cur_thr.tolist())
                         else:
                             for val, map_val in self._dict_map_.items():
                                 self.val_lbd_dict[val].extend(eval(map_val).tolist())

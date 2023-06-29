@@ -114,7 +114,7 @@ class RoIHeadTemplate(nn.Module):
         sample_gts = []
         sample_gt_iou_of_rois = []
 
-        if 'ori_unlabeled_boxes' in targets_dict:
+        if 'ori_gt_boxes' in targets_dict:
             unlabeled_inds = targets_dict['unlabeled_inds']
             for i, uind in enumerate(unlabeled_inds):
                 mask = (targets_dict['reg_valid_mask'][uind] > 0) if mask_type == 'reg' else (
@@ -143,7 +143,7 @@ class RoIHeadTemplate(nn.Module):
                 sample_pred_scores.append(pred_scores)
 
                 # (Real labels) GT info
-                gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
+                gt_labeled_boxes = targets_dict['ori_gt_boxes'][uind]
                 sample_gts.append(gt_labeled_boxes)
 
                 # (Pseudo labels) PL info

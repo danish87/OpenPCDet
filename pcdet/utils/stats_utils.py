@@ -3,10 +3,10 @@
 # <OpenPCDet_HOME>/output/cfgs/kitti_models/pv_rcnn_ssl/enabled_st_all_bs8_dist4_split_1_2_trial3_169035d/eval/eval_with_train/epoch_60/val/result.pkl
 # --gt_infos
 # <OpenPCDet_HOME>/data/kitti/kitti_infos_val.pkl
-import os
+
 import argparse
 import pickle
-import torch.nn.functional as F
+
 from torchmetrics import Metric
 import torch
 import numpy as np
@@ -15,6 +15,11 @@ import math
 from pcdet.config import cfg
 from matplotlib import pyplot as plt
 import torch.nn.functional as F
+
+# TODO(farzad): Pass only scores and labels?
+#               Calculate overlap inside update or compute?
+#               Change the states to TP, FP, FN, etc?
+#               Calculate incrementally based on summarized value?
 
 
 
@@ -37,11 +42,7 @@ class PredQualityMetrics(Metric):
                              "pred_weight_uc", "pred_fn_rate", "pred_tp_rate", "pred_fp_ratio", "pred_ious_wrt_pl_fg",
                              "pred_ious_wrt_pl_fn", "pred_ious_wrt_pl_fp", "pred_ious_wrt_pl_tp", "score_fgs_tp",
                              "score_fgs_fn", "score_fgs_fp", "target_score_fn", "target_score_tp", "target_score_fp",
-                             "pred_weight_fn", "pred_weight_tp", "pred_weight_fp","rcnn_sh_fg_mean","rcnn_sh_uc_mean","rcnn_sh_bg_mean",
-                             "rcnn_sh_fg_mean_Car","rcnn_sh_uc_mean_Car","rcnn_sh_bg_mean_Car","rcnn_sh_fg_mean_Ped","rcnn_sh_uc_mean_Ped",
-                             "rcnn_sh_bg_mean_Ped","rcnn_sh_fg_mean_Cyc","rcnn_sh_uc_mean_Cyc","rcnn_sh_bg_mean_Cyc","rcnn_sh_template_fg","rcnn_sh_template_bg",
-                             "rcnn_sh_template_uc"]
-        
+                             "pred_weight_fn", "pred_weight_tp", "pred_weight_fp"]
         self.min_overlaps = np.array([0.7, 0.5, 0.5, 0.7, 0.5, 0.7])
         self.class_agnostic_fg_thresh = 0.7
 
@@ -67,7 +68,7 @@ class PredQualityMetrics(Metric):
         pseudo_labels = [pl_box.clone().detach() for pl_box in pseudo_labels] if pseudo_labels is not None else None
         pred_weights = [pred_weight.clone().detach() for pred_weight in pred_weights] if pred_weights is not None else None
         sample_tensor = preds[0] if len(preds) else ground_truths[0]
-    
+        num_classes = len(self.dataset.class_names)
         for i in range(len(preds)):
             valid_preds_mask = torch.logical_not(torch.all(preds[i] == 0, dim=-1))
             valid_pred_boxes = preds[i][valid_preds_mask]
@@ -79,8 +80,6 @@ class PredQualityMetrics(Metric):
             valid_pred_iou_wrt_pl = pred_iou_wrt_pl[i][valid_preds_mask.nonzero().view(-1)].squeeze() if pred_iou_wrt_pl else None
             valid_gts_mask = torch.logical_not(torch.all(ground_truths[i] == 0, dim=-1))
             valid_gt_boxes = ground_truths[i][valid_gts_mask]
-            num_classes = len(self.dataset.class_names)
-
             if pseudo_labels is not None:
                 valid_pl_mask = torch.logical_not(torch.all(pseudo_labels[i] == 0, dim=-1))
                 valid_pl_boxes = pseudo_labels[i][valid_pl_mask] if pseudo_labels else None
@@ -336,18 +335,19 @@ class KITTIEvalMetrics(Metric):
             raw_metrics_classwise = {}
             for m, metric_name in enumerate(
                     ['tps', 'fps', 'fns', 'sim', 'thresh', 'trans_err', 'orient_err', 'scale_err']):
-                if metric_name == 'sim' or metric_name == 'thresh':
-                    continue
+                if metric_name == 'sim' or metric_name == 'thresh': continue
                 class_metrics_all = {}
                 class_metrics_batch = {}
                 for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
-                    metric_value = np.nanmax(detailed_stats[c, 0, :, m])
-                    if not np.isnan(metric_value):
-                        class_metrics_all[cls_name] = metric_value
-                        if metric_name in ['tps', 'fps', 'fns']:
-                            class_metrics_batch[cls_name] = metric_value / total_num_samples
-                        elif metric_name in ['trans_err', 'orient_err', 'scale_err']:
-                            class_metrics_batch[cls_name] = metric_value
+                    ds = detailed_stats[c, 0, :, m]
+                    if not ds.shape: continue
+                    metric_value = np.nanmax(ds)
+                    if np.isnan(metric_value): continue
+                    class_metrics_all[cls_name] = metric_value
+                    if metric_name in ['tps', 'fps', 'fns']:
+                        class_metrics_batch[cls_name] = metric_value / total_num_samples
+                    elif metric_name in ['trans_err', 'orient_err', 'scale_err']:
+                        class_metrics_batch[cls_name] = metric_value
                 raw_metrics_classwise[metric_name] = class_metrics_all
                 if metric_name in ['tps', 'fps', 'fns']:
                     kitti_eval_metrics[metric_name + '_per_sample'] = class_metrics_batch
@@ -360,15 +360,13 @@ class KITTIEvalMetrics(Metric):
             ulb_lbl_ratio = num_ulb_samples / num_lbl_samples
             pred_labels, pred_scores = [], []
             for sample_dets in detections:
-                if len(sample_dets) == 0:
-                    continue
+                if len(sample_dets) == 0: continue
                 pred_labels.append(sample_dets[:, -2])
                 pred_scores.append(sample_dets[:, -1])
             pred_labels = torch.cat(pred_labels).to(torch.int64).view(-1)
             pred_scores = torch.cat(pred_scores).view(-1)
             classwise_thresh = pred_scores.new_tensor(self.min_overlaps[0, self.metric]).unsqueeze(0).repeat(
-                len(pred_labels), 1).gather(
-                dim=-1, index=pred_labels.unsqueeze(-1)).view(-1)
+                len(pred_labels), 1).gather(dim=-1, index=pred_labels.unsqueeze(-1)).view(-1)
             tp_mask = pred_scores >= classwise_thresh
             pr_cls = {}
             ulb_cls_counter = {}
@@ -385,33 +383,32 @@ class KITTIEvalMetrics(Metric):
                 pr_cls[cls_name] = num_ulb_cls / (ulb_lbl_ratio * num_lbl_cls)
 
             cls_dist = {}
-            if sum(ulb_cls_counter.values()):
-                for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
-                    cls_dist[cls_name+'_lbl'] = lbl_cls_counter[cls_name] / sum(lbl_cls_counter.values())
-                    cls_dist[cls_name+'_ulb'] = ulb_cls_counter[cls_name] / sum(ulb_cls_counter.values())
-                lbl_dist = torch.tensor(list(lbl_cls_counter.values())) / sum(lbl_cls_counter.values())
-                ulb_dist = torch.tensor(list(ulb_cls_counter.values())) / sum(ulb_cls_counter.values())
+            for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
+                cls_dist[cls_name+'_lbl'] = lbl_cls_counter[cls_name] / sum(lbl_cls_counter.values())
+                cls_dist[cls_name+'_ulb'] = ulb_cls_counter[cls_name] / sum(ulb_cls_counter.values())
+            lbl_dist = torch.tensor(list(lbl_cls_counter.values())) / sum(lbl_cls_counter.values())
+            ulb_dist = torch.tensor(list(ulb_cls_counter.values())) / sum(ulb_cls_counter.values())
 
-                kl_div = F.kl_div(ulb_dist.log().unsqueeze(0), lbl_dist.unsqueeze(0), reduction="batchmean").item()
-                kitti_eval_metrics['class_distribution'] = cls_dist
-                kitti_eval_metrics['kl_div'] = kl_div
-                kitti_eval_metrics['PR'] = pr_cls
+            kl_div = F.kl_div(ulb_dist.log().unsqueeze(0), lbl_dist.unsqueeze(0), reduction="batchmean").item()
+            kitti_eval_metrics['class_distribution'] = cls_dist
+            kitti_eval_metrics['kl_div'] = kl_div
+            kitti_eval_metrics['PR'] = pr_cls
 
             # Get calculated Precision
             for m, metric_name in enumerate(['mAP_3d', 'mAP_3d_R40']):
                 class_metrics_all = {}
                 for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
                     metric_value = kitti_eval_metrics[metric_name][c].item()
-                    if not np.isnan(metric_value):
-                        class_metrics_all[cls_name] = metric_value
+                    if np.isnan(metric_value): continue
+                    class_metrics_all[cls_name] = metric_value
                 kitti_eval_metrics[metric_name] = class_metrics_all
 
             # Get calculated recall
             class_metrics_all = {}
             for c, cls_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
                 metric_value = np.nanmax(kitti_eval_metrics['raw_recall'][c])
-                if not np.isnan(metric_value):
-                    class_metrics_all[cls_name] = metric_value
+                if np.isnan(metric_value): continue
+                class_metrics_all[cls_name] = metric_value
             kitti_eval_metrics['max_recall'] = class_metrics_all
 
             # Draw Precision-Recall curves
@@ -432,8 +429,7 @@ class KITTIEvalMetrics(Metric):
                 ax_c.set_ylabel('Precision', color='b')
                 ax_c_twin.set_ylabel('Recall', color='r')
 
-            prec_rec_fig = fig.get_figure()
-            kitti_eval_metrics['prec_rec_fig'] = prec_rec_fig
+            kitti_eval_metrics['prec_rec_fig'] = fig.get_figure()
             plt.close()
             kitti_eval_metrics.pop('recall')
             kitti_eval_metrics.pop('precision')
@@ -753,7 +749,7 @@ def cal_tp_metric(tp_boxes, gt_boxes):
     aligned_tp_boxes[:, 0:3] = gt_boxes[:, 0:3]
     # align their angle
     aligned_tp_boxes[:, 6] = gt_boxes[:, 6]
-    iou_matrix = iou3d_nms_utils.boxes_iou3d_gpu(aligned_tp_boxes[:, 0:7], gt_boxes[:, 0:7])
+    iou_matrix = iou3d_nms_utils.boxes_iou3d_gpu(aligned_tp_boxes[:, 0:7], gt_boxes[:, 0:7]).clone().detach()
     max_ious, _ = torch.max(iou_matrix, dim=1)
     scale_err = (1 - max_ious).sum().item()
 
