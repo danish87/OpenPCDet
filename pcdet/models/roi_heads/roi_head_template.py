@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from ...utils import box_coder_utils, common_utils, loss_utils
 from ..model_utils.model_nms_utils import class_agnostic_nms
 from .target_assigner.proposal_target_layer import ProposalTargetLayer
+from visual_utils import visualize_utils as V
 
 
 class RoIHeadTemplate(nn.Module):
@@ -102,7 +103,7 @@ class RoIHeadTemplate(nn.Module):
         batch_dict.pop('batch_index', None)
         return batch_dict
     
-    def update_metrics(self, targets_dict, mask_type='cls', vis_type='pred_gt', pred_type=None):
+    def update_metrics(self, targets_dict, mask_type='cls', vis_type='roi_pl', pred_type=None):
         if 'metric_registry' not in targets_dict: return
 
         metric_registry = targets_dict['metric_registry']
@@ -113,7 +114,7 @@ class RoIHeadTemplate(nn.Module):
         ema_preds_of_std_rois, ema_pred_scores_of_std_rois = [], []
         sample_gts = []
         sample_gt_iou_of_rois = []
-
+        cur_iteration = targets_dict['cur_iteration']
         if 'ori_gt_boxes' in targets_dict:
             unlabeled_inds = targets_dict['unlabeled_inds']
             for i, uind in enumerate(unlabeled_inds):
@@ -162,6 +163,55 @@ class RoIHeadTemplate(nn.Module):
                 if self.model_cfg.get('ENABLE_SOFT_TEACHER', False):
                     pred_weights = targets_dict['rcnn_cls_weights'][uind][mask].detach().clone()
                     sample_pred_weights.append(pred_weights)
+
+                if self.model_cfg.get('ENABLE_VIS', False) and cur_iteration > 5:
+                    points_mask = targets_dict['points'][:, 0] == uind
+                    points = targets_dict['points'][points_mask, 1:]
+                    # sampling in order to reduce vis time
+                    random_indices = np.random.choice(points.shape[0], size=1000, replace=False)
+                    points = points[random_indices]
+
+                    iou_wrt_pl = gt_iou_of_rois.squeeze()
+                    vis_pred_boxes = roi_labeled_boxes[:, :-1]
+                    vis_pred_scores = iou_wrt_pl
+                    current_labels = roi_labels.view(-1)
+                    gt_boxes = pl_labeled_boxes[:, :-1]
+
+
+                    V.vis(points, gt_boxes=gt_boxes, pred_boxes=vis_pred_boxes,
+                        pred_scores=vis_pred_scores, pred_labels=current_labels,
+                        filename=f'vis_{vis_type}_{cur_iteration}_{uind}.png')
+                    
+                    for cind, class_name in enumerate(['Car', 'Pedestrian', 'Cyclist']):
+                        roi_mask = (current_labels == (cind+1))
+                        pl_mask = (pl_labeled_boxes[:,-1] == (cind+1))
+                        gt_boxes = pl_labeled_boxes[pl_mask, :-1]
+
+                        if not roi_mask.sum():
+                            continue
+                        vis_pred_boxes = roi_labeled_boxes[roi_mask, :-1]
+                        vis_pred_scores = iou_wrt_pl[roi_mask]
+                        vis_pred_labels = current_labels[roi_mask]
+                        
+
+
+                        V.vis(points, gt_boxes=gt_boxes, pred_boxes=vis_pred_boxes,
+                        pred_scores=vis_pred_scores, pred_labels=vis_pred_labels,
+                        filename=f'vis_{vis_type}_iter_{cur_iteration}_batch_{uind}_{class_name}.png')
+
+
+                        neg_mask = (iou_wrt_pl[roi_mask] > 0.1) & (iou_wrt_pl[roi_mask] < 0.3)
+                        if not neg_mask.sum():
+                            continue
+                        vis_pred_boxes = roi_labeled_boxes[roi_mask, :-1][neg_mask]
+                        vis_pred_scores = iou_wrt_pl[roi_mask][neg_mask]
+                        vis_pred_labels = current_labels[roi_mask][neg_mask]
+                        
+
+
+                        V.vis(points, gt_boxes=gt_boxes, pred_boxes=vis_pred_boxes,
+                        pred_scores=vis_pred_scores, pred_labels=vis_pred_labels,
+                        filename=f'vis_{vis_type}_iter_{cur_iteration}_batch_{uind}_{class_name}_neg_mask.png')
 
         else: # pretraining stage
             #['rois', 'gt_of_rois', 'gt_iou_of_rois', 'roi_scores', 'roi_labels', 'reg_valid_mask', 'rcnn_cls_labels', 'gt_of_rois_src', 'batch_box_preds', 'rcnn_cls', 'rcnn_reg']
@@ -245,7 +295,8 @@ class RoIHeadTemplate(nn.Module):
         batch_size = batch_dict['batch_size']
         with torch.no_grad():
             targets_dict = self.proposal_target_layer.forward(batch_dict)
-
+        targets_dict['points'] = batch_dict['points']
+        targets_dict['cur_iteration'] = batch_dict['cur_iteration']
         rois = targets_dict['rois']  # (B, N, 7 + C)
         gt_of_rois = targets_dict['gt_of_rois']  # (B, N, 7 + C + 1)
         targets_dict['gt_of_rois_src'] = gt_of_rois.clone().detach()

@@ -161,6 +161,7 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
+        ENABLE_VIS: False
         ENABLE_EVAL: False
         METRICS_PRED_TYPES: [pred_pl, pred_gt, roi_pl_gt]
         SHARED_FC: [256, 256]

@@ -9,6 +9,7 @@ from.pv_rcnn import PVRCNN
 from ...utils.stats_utils import KITTIEvalMetrics, PredQualityMetrics
 from torchmetrics.collections import MetricCollection
 import torch.distributed as dist
+from visual_utils import visualize_utils as V
 
 class MetricRegistry(object):
     def __init__(self, **kwargs):
@@ -56,18 +57,21 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
-
-        vals_to_store = ['iou_roi_pl', 'iou_roi_gt', 'pred_scores', 'iteration','roi_labels', 'roi_scores']
-        self.val_lbd_dict = {val: [] for val in vals_to_store}
-        self.val_unlbd_dict = {val: [] for val in vals_to_store}
         self._dict_map_ = {
                 'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
                 'iou_roi_gt': 'preds_iou_max',
-                'pred_scores': 'batch_pred_score[batch_index]',
+                'angle_diff': 'batch_angle_diff[batch_index]',
+                'center_dist': 'batch_center_dist[batch_index]',
                 'iteration': 'cur_iteration',
                 'roi_labels': 'batch_roi_labels[batch_index]',
-                'roi_scores': 'batch_roi_score[batch_index]'
+                'roi_scores': 'batch_roi_score[batch_index]',
+                'raw_roi_scores': 'batch_raw_roi_score[batch_index]',
+                'pred_scores': 'batch_pred_score[batch_index]',
+                'raw_pred_scores': 'batch_raw_pred_score[batch_index]',
+                'target_labels': 'batch_target_labels[batch_index]'
             }
+        self.val_lbd_dict = {val: [] for val in self._dict_map_.keys()}
+        self.val_unlbd_dict = {val: [] for val in self._dict_map_.keys()}
 
     def forward(self, batch_dict):
         if self.training:
@@ -222,9 +226,20 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_rois = self.pv_rcnn.roi_head.forward_ret_dict['rois'].detach().clone()
                 batch_ori_gt_boxes = self.pv_rcnn.roi_head.forward_ret_dict['ori_gt_boxes'].detach().clone()
                 batch_iou_roi_pl = self.pv_rcnn.roi_head.forward_ret_dict['gt_iou_of_rois'].detach().clone()
-                batch_pred_score = torch.sigmoid(batch_dict['batch_cls_preds']).detach().clone().squeeze()
-                batch_roi_score =  torch.sigmoid(self.pv_rcnn.roi_head.forward_ret_dict['roi_scores']).detach().clone()
+                
+                batch_center_dist = self.pv_rcnn.roi_head.forward_ret_dict['center_dist'].detach().clone()
+                batch_angle_diff = self.pv_rcnn.roi_head.forward_ret_dict['angle_diff'].detach().clone()
+                
+                batch_raw_roi_score =  self.pv_rcnn.roi_head.forward_ret_dict['roi_scores'].detach().clone()
+                batch_roi_score =  torch.sigmoid(batch_raw_roi_score)
+                
+                
+                batch_raw_pred_score = batch_dict['batch_cls_preds'].detach().clone().squeeze()
+                batch_pred_score = torch.sigmoid(batch_raw_pred_score)
+                batch_target_labels = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_labels'].detach().clone()
 
+
+                
                 for batch_index in range(len(batch_rois)):
                     valid_rois_mask = torch.logical_not(torch.all(batch_rois[batch_index] == 0, dim=-1))
                     valid_rois = batch_rois[batch_index][valid_rois_mask]

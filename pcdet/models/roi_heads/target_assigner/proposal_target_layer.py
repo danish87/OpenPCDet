@@ -1,9 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
 from ....ops.iou3d_nms import iou3d_nms_utils
-
+import math
 
 class ProposalTargetLayer(nn.Module):
     def __init__(self, roi_sampler_cfg):
@@ -30,7 +29,8 @@ class ProposalTargetLayer(nn.Module):
                 rcnn_cls_labels: (B, M)
         """
         (batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, \
-         classwise_lab_max_iou_bfs, classwise_lab_max_iou_afs, \
+            batch_center_dist, batch_angle_diff, \
+            classwise_lab_max_iou_bfs, classwise_lab_max_iou_afs, \
             classwise_unlab_max_iou_bfs, classwise_unlab_max_iou_afs) = self.sample_rois_for_rcnn(
             batch_dict=batch_dict
         )
@@ -60,6 +60,8 @@ class ProposalTargetLayer(nn.Module):
                         'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
                         'reg_valid_mask': reg_valid_mask,
                         'rcnn_cls_labels': batch_cls_labels,
+                        'center_dist': batch_center_dist,
+                        'angle_diff' : batch_angle_diff,
                         'classwise_unlab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_bfs.items()}, 
                         'classwise_unlab_max_iou_afs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_afs.items()},
                         'classwise_lab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_lab_max_iou_bfs.items()}, 
@@ -94,6 +96,8 @@ class ProposalTargetLayer(nn.Module):
         batch_roi_ious = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_roi_scores = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_roi_labels = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
+        batch_center_dist = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
+        batch_angle_diff = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
 
         for index in range(batch_size):
             cur_roi, cur_gt, cur_roi_labels, cur_roi_scores = \
@@ -105,7 +109,7 @@ class ProposalTargetLayer(nn.Module):
             cur_gt = cur_gt.new_zeros((1, cur_gt.shape[1])) if len(cur_gt) == 0 else cur_gt
 
             if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-                max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+                max_overlaps, gt_assignment, center_distance, angle_diff = self.get_max_iou_with_same_class(
                     rois=cur_roi, roi_labels=cur_roi_labels,
                     gt_boxes=cur_gt[:, 0:7], gt_labels=cur_gt[:, -1].long()
                 )
@@ -120,6 +124,10 @@ class ProposalTargetLayer(nn.Module):
             batch_roi_ious[index] = max_overlaps[sampled_inds]
             batch_roi_scores[index] = cur_roi_scores[sampled_inds]
             batch_gt_of_rois[index] = cur_gt[gt_assignment[sampled_inds]]
+            
+            # only when SAMPLE_ROI_BY_EACH_CLASS
+            batch_center_dist[index] = center_distance[sampled_inds] 
+            batch_angle_diff[index] = angle_diff[sampled_inds]
 
             # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
             for cind in range(3):
@@ -154,6 +162,7 @@ class ProposalTargetLayer(nn.Module):
 
 
         return batch_rois, batch_gt_of_rois, batch_roi_ious, batch_roi_scores, batch_roi_labels, \
+                    batch_center_dist, batch_angle_diff, \
                     classwise_lab_max_iou_bfs, classwise_lab_max_iou_afs, \
                     classwise_unlab_max_iou_bfs, classwise_unlab_max_iou_afs
 
@@ -254,6 +263,8 @@ class ProposalTargetLayer(nn.Module):
         """
         max_overlaps = rois.new_zeros(rois.shape[0])
         gt_assignment = roi_labels.new_zeros(roi_labels.shape[0])
+        center_distance = rois.new_zeros(rois.shape[0])
+        angle_diff = rois.new_zeros(rois.shape[0])
 
         for k in range(gt_labels.min().item(), gt_labels.max().item() + 1):
             roi_mask = (roi_labels == k)
@@ -268,4 +279,43 @@ class ProposalTargetLayer(nn.Module):
                 max_overlaps[roi_mask] = cur_max_overlaps
                 gt_assignment[roi_mask] = original_gt_assignment[cur_gt_assignment]
 
-        return max_overlaps, gt_assignment
+                roi_centers = cur_roi[:, 0:3]
+                gt_centers = cur_gt[cur_gt_assignment, 0:3]
+
+                center_distance[roi_mask] = torch.norm(roi_centers - gt_centers, dim=1)  # Euclidean distance
+                angle_diff[roi_mask] = cal_angle_diff(cur_roi[:, 6], cur_gt[cur_gt_assignment,6])
+
+                # This rectification factor that reduces the cur_max_overlaps value as 
+                # the center distance increases, effectively penalizing larger center distances 
+                # and adjusting the IOU scores accordingly.
+                # max_overlaps[roi_mask] = max_overlaps[roi_mask] * torch.exp(-center_distance)
+
+
+        return max_overlaps, gt_assignment, center_distance, angle_diff
+
+
+
+def cor_angle_range(angle):
+    """ correct angle range to [-pi, pi]
+    Args:
+        angle:
+    Returns:
+    """
+    gt_pi_mask = angle > np.pi
+    lt_minus_pi_mask = angle < - np.pi
+    angle[gt_pi_mask] = angle[gt_pi_mask] - 2 * np.pi
+    angle[lt_minus_pi_mask] = angle[lt_minus_pi_mask] + 2 * np.pi
+
+    return angle
+
+
+def cal_angle_diff(angle1, angle2):
+    # angle is from x to y, anti-clockwise
+    angle1 = cor_angle_range(angle1)
+    angle2 = cor_angle_range(angle2)
+
+    diff = torch.abs(angle1 - angle2)
+    gt_pi_mask = diff > math.pi
+    diff[gt_pi_mask] = 2 * math.pi - diff[gt_pi_mask]
+
+    return diff
