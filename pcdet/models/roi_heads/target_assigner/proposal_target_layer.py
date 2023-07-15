@@ -65,6 +65,10 @@ class ProposalTargetLayer(nn.Module):
         interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
         batch_center_dist = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         batch_angle_diff = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
+        classwise_lab_max_iou_bfs = {}
+        classwise_lab_max_iou_afs = {}
+        classwise_unlab_max_iou_bfs = {}
+        classwise_unlab_max_iou_afs = {}
 
         for index in range(batch_size):
             cur_gt_boxes = batch_dict['gt_boxes'][index]
@@ -78,12 +82,12 @@ class ProposalTargetLayer(nn.Module):
             if index in batch_dict['unlabeled_inds']:
                 # Subsample unlabeled ROIs using Top-K subsampler
                 (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, 
-                 gt_assignment, cur_interval_mask, center_distance, angle_diff) = \
+                 gt_assignment, cur_interval_mask, center_distance, angle_diff, max_overlaps) = \
                     self.subsample_unlabeled_rois(batch_dict, index)
             else:
                 # Subsampler labeled ROIs using randomly balanced subsampler
                 (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, 
-                 gt_assignment, cur_interval_mask, center_distance, angle_diff) = \
+                 gt_assignment, cur_interval_mask, center_distance, angle_diff, max_overlaps) = \
                     self.subsample_labeled_rois(batch_dict, index)
             
             # Fill tensors with sampled values
@@ -98,13 +102,47 @@ class ProposalTargetLayer(nn.Module):
             batch_center_dist[index] = center_distance[sampled_inds] 
             batch_angle_diff[index] = angle_diff[sampled_inds]
             
+            # ------------------- Temprorialy added for record keeping before and after subsampling --------------------
+            for cind in range(3):
+                roi_mask = (batch_dict['roi_labels'][index] == (cind+1))
+                cur_max_overlaps = max_overlaps[roi_mask]
+                cur_max_overlaps_bfs = torch.cat([cur_max_overlaps, 
+                            cur_max_overlaps.new_full((batch_dict['roi_labels'][index].shape[0] - cur_max_overlaps.shape[0],), -1)])
+                
+                roi_mask = (batch_dict['roi_labels'][index][sampled_inds] == (cind+1))
+                cur_max_overlaps = max_overlaps[sampled_inds][roi_mask]
+                cur_max_overlaps_afs = torch.cat([cur_max_overlaps, 
+                            cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)])
+                
+                # before and after subsampling
+                if 'unlabeled_inds' in batch_dict and index in batch_dict['unlabeled_inds']:
+                    if cind not in classwise_unlab_max_iou_bfs:
+                        classwise_unlab_max_iou_bfs[cind] = []
+                    classwise_unlab_max_iou_bfs[cind].extend(cur_max_overlaps_bfs)
+
+                    if cind not in classwise_unlab_max_iou_afs:
+                        classwise_unlab_max_iou_afs[cind] = []
+                    classwise_unlab_max_iou_afs[cind].extend(cur_max_overlaps_afs)
+                else:
+                    if cind not in classwise_lab_max_iou_bfs:
+                        classwise_lab_max_iou_bfs[cind] = []
+                    classwise_lab_max_iou_bfs[cind].extend(cur_max_overlaps_bfs)
+                    
+                    if cind not in classwise_lab_max_iou_afs:
+                        classwise_lab_max_iou_afs[cind] = []
+                    classwise_lab_max_iou_afs[cind].extend(cur_max_overlaps_afs)
+            
         targets_dict = {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
                         'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
                         'reg_valid_mask': batch_reg_valid_mask,
                         'rcnn_cls_labels': batch_cls_labels,
                         'interval_mask': interval_mask,
                         'center_dist': batch_center_dist,
-                        'angle_diff' : batch_angle_diff}
+                        'angle_diff' : batch_angle_diff,
+                        'classwise_unlab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_bfs.items()}, 
+                        'classwise_unlab_max_iou_afs': {k: torch.stack(v) for k, v in classwise_unlab_max_iou_afs.items()},
+                        'classwise_lab_max_iou_bfs': {k: torch.stack(v) for k, v in classwise_lab_max_iou_bfs.items()}, 
+                        'classwise_lab_max_iou_afs': {k: torch.stack(v) for k, v in classwise_lab_max_iou_afs.items()}}
 
         return targets_dict
 
@@ -161,7 +199,7 @@ class ProposalTargetLayer(nn.Module):
         cur_cls_labels[interval_mask] = (roi_ious[interval_mask] - cls_bg_thresh) \
                                         / (cls_fg_thresh[interval_mask] - cls_bg_thresh)
 
-        return sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff
+        return sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff, max_overlaps
 
     '''
     Subsample ROIs using Randomly balanced subsampler for labeled data.
@@ -195,7 +233,7 @@ class ProposalTargetLayer(nn.Module):
             (roi_ious[interval_mask] - self.roi_sampler_cfg.CLS_BG_THRESH) \
                 / (self.roi_sampler_cfg.CLS_FG_THRESH - self.roi_sampler_cfg.CLS_BG_THRESH)
 
-        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff
+        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff, max_overlaps
 
     def subsample_rois(self, max_overlaps, reg_fg_thresh=None, cls_fg_thresh=None):
         if reg_fg_thresh is None:

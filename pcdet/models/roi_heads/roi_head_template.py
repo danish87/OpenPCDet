@@ -344,7 +344,11 @@ class RoIHeadTemplate(nn.Module):
 
         return unlabeled_rcnn_cls_weights
             
-
+    def calc_entropy(self):
+        pred_scores = self.forward_ret_dict['rcnn_cls'].squeeze()
+        elementwise_entropy = -F.softmax(pred_scores, dim=-1) * F.log_softmax(pred_scores, dim=-1)
+        return torch.sum(elementwise_entropy)
+    
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict
 
