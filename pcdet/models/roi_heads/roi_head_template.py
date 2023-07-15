@@ -9,7 +9,6 @@ from ...utils import box_coder_utils, common_utils, loss_utils
 from ..model_utils.model_nms_utils import class_agnostic_nms
 from .target_assigner.proposal_target_layer import ProposalTargetLayer
 
-from visual_utils import visualize_utils as V
 
 class RoIHeadTemplate(nn.Module):
     def __init__(self, num_class, model_cfg, predict_boxes_when_training=True):
@@ -145,7 +144,7 @@ class RoIHeadTemplate(nn.Module):
             sample_pred_scores.append(pred_scores)
 
             # (Real labels) GT box info
-            gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
+            gt_labeled_boxes = targets_dict['ori_gt_boxes'][uind]
             sample_gts.append(gt_labeled_boxes)
 
             # (Pseudo labels) PL box info
@@ -332,17 +331,16 @@ class RoIHeadTemplate(nn.Module):
     def _get_reliability_weight(self, unlabeled_inds):
         # Initialize reliability weights with 1s
         self.forward_ret_dict['rcnn_cls_weights'] = torch.ones_like(self.forward_ret_dict['rcnn_cls_labels'])
-        
-        # Compute the background scores from the teacher based on student proposals
-        rcnn_bg_score_teacher = 1 - self.forward_ret_dict['rcnn_cls_score_teacher']
         unlabeled_rcnn_cls_weights = self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] 
         
-        ul_interval_mask = self.forward_ret_dict['interval_mask'][unlabeled_inds]
-
-        # Use 1s for FG mask, suppress false positives from UC, false negatives from BG regions
-        unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
-        ulb_bg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 0
-        unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
+        if not self.model_cfg.get("ENABLE_BASELINE", None):
+            # Compute the background scores from the teacher based on student proposals
+            rcnn_bg_score_teacher = 1 - self.forward_ret_dict['rcnn_cls_score_teacher']
+            ul_interval_mask = self.forward_ret_dict['interval_mask'][unlabeled_inds]
+            # Use 1s for FG mask, suppress false positives from UC, false negatives from BG regions
+            unlabeled_rcnn_cls_weights[ul_interval_mask] = self.forward_ret_dict['rcnn_cls_score_teacher'][unlabeled_inds][ul_interval_mask]
+            ulb_bg_mask = self.forward_ret_dict['rcnn_cls_labels'][unlabeled_inds] == 0
+            unlabeled_rcnn_cls_weights[ulb_bg_mask] = rcnn_bg_score_teacher[unlabeled_inds][ulb_bg_mask]
 
         return unlabeled_rcnn_cls_weights
             

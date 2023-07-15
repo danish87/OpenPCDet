@@ -160,6 +160,7 @@ MODEL:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
         ENABLE_METRICS: False
+        ENABLE_BASELINE: False
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]
@@ -237,6 +238,7 @@ MODEL:
     SUPERVISE_MODE: 0
     NO_NMS: False
     EMA_ALPHA: 0.999
+    STORE_SCORES_IN_PKL: False
 
 
 OPTIMIZATION:

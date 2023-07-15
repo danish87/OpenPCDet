@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+import math
 from ....ops.iou3d_nms import iou3d_nms_utils
 
 
@@ -63,6 +63,8 @@ class ProposalTargetLayer(nn.Module):
         batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
         batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
+        batch_center_dist = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
+        batch_angle_diff = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
 
         for index in range(batch_size):
             cur_gt_boxes = batch_dict['gt_boxes'][index]
@@ -75,11 +77,13 @@ class ProposalTargetLayer(nn.Module):
 
             if index in batch_dict['unlabeled_inds']:
                 # Subsample unlabeled ROIs using Top-K subsampler
-                sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = \
+                (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, 
+                 gt_assignment, cur_interval_mask, center_distance, angle_diff) = \
                     self.subsample_unlabeled_rois(batch_dict, index)
             else:
                 # Subsampler labeled ROIs using randomly balanced subsampler
-                sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = \
+                (sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, 
+                 gt_assignment, cur_interval_mask, center_distance, angle_diff) = \
                     self.subsample_labeled_rois(batch_dict, index)
             
             # Fill tensors with sampled values
@@ -91,12 +95,16 @@ class ProposalTargetLayer(nn.Module):
             batch_reg_valid_mask[index] = cur_reg_valid_mask
             batch_cls_labels[index] = cur_cls_labels
             interval_mask[index] = cur_interval_mask
+            batch_center_dist[index] = center_distance[sampled_inds] 
+            batch_angle_diff[index] = angle_diff[sampled_inds]
             
         targets_dict = {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
                         'roi_scores': batch_roi_scores, 'roi_labels': batch_roi_labels,
                         'reg_valid_mask': batch_reg_valid_mask,
                         'rcnn_cls_labels': batch_cls_labels,
-                        'interval_mask': interval_mask}
+                        'interval_mask': interval_mask,
+                        'center_dist': batch_center_dist,
+                        'angle_diff' : batch_angle_diff}
 
         return targets_dict
 
@@ -109,7 +117,7 @@ class ProposalTargetLayer(nn.Module):
         cur_roi_labels = batch_dict['roi_labels'][index]
 
         if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+            max_overlaps, gt_assignment, center_distance, angle_diff = self.get_max_iou_with_same_class(
                 rois=cur_roi, roi_labels=cur_roi_labels,
                 gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long()
             )
@@ -153,7 +161,7 @@ class ProposalTargetLayer(nn.Module):
         cur_cls_labels[interval_mask] = (roi_ious[interval_mask] - cls_bg_thresh) \
                                         / (cls_fg_thresh[interval_mask] - cls_bg_thresh)
 
-        return sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, interval_mask
+        return sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff
 
     '''
     Subsample ROIs using Randomly balanced subsampler for labeled data.
@@ -164,7 +172,7 @@ class ProposalTargetLayer(nn.Module):
         cur_roi_labels = batch_dict['roi_labels'][index]
 
         if self.roi_sampler_cfg.get('SAMPLE_ROI_BY_EACH_CLASS', False):
-            max_overlaps, gt_assignment = self.get_max_iou_with_same_class(
+            max_overlaps, gt_assignment, center_distance, angle_diff = self.get_max_iou_with_same_class(
                 rois=cur_roi, roi_labels=cur_roi_labels,
                 gt_boxes=cur_gt_boxes[:, 0:7], gt_labels=cur_gt_boxes[:, -1].long()
             )
@@ -187,7 +195,7 @@ class ProposalTargetLayer(nn.Module):
             (roi_ious[interval_mask] - self.roi_sampler_cfg.CLS_BG_THRESH) \
                 / (self.roi_sampler_cfg.CLS_FG_THRESH - self.roi_sampler_cfg.CLS_BG_THRESH)
 
-        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask
+        return sampled_inds, reg_valid_mask, cls_labels, roi_ious, gt_assignment, interval_mask, center_distance, angle_diff
 
     def subsample_rois(self, max_overlaps, reg_fg_thresh=None, cls_fg_thresh=None):
         if reg_fg_thresh is None:
@@ -293,7 +301,8 @@ class ProposalTargetLayer(nn.Module):
         """
         max_overlaps = rois.new_zeros(rois.shape[0])
         gt_assignment = roi_labels.new_zeros(roi_labels.shape[0])
-
+        center_distance = rois.new_zeros(rois.shape[0])
+        angle_diff = rois.new_zeros(rois.shape[0])
         for k in range(gt_labels.min().item(), gt_labels.max().item() + 1):
             roi_mask = (roi_labels == k)
             gt_mask = (gt_labels == k)
@@ -306,5 +315,34 @@ class ProposalTargetLayer(nn.Module):
                 cur_max_overlaps, cur_gt_assignment = torch.max(iou3d, dim=1)
                 max_overlaps[roi_mask] = cur_max_overlaps
                 gt_assignment[roi_mask] = original_gt_assignment[cur_gt_assignment]
+                roi_centers = cur_roi[:, 0:3]
+                gt_centers = cur_gt[cur_gt_assignment, 0:3]
+                center_distance[roi_mask] = torch.norm(roi_centers - gt_centers, dim=1)  # Euclidean distance
+                angle_diff[roi_mask] = cal_angle_diff(cur_roi[:, 6], cur_gt[cur_gt_assignment,6])
 
-        return max_overlaps, gt_assignment
+        return max_overlaps, gt_assignment, center_distance, angle_diff
+
+def cor_angle_range(angle):
+    """ correct angle range to [-pi, pi]
+    Args:
+        angle:
+    Returns:
+    """
+    gt_pi_mask = angle > np.pi
+    lt_minus_pi_mask = angle < - np.pi
+    angle[gt_pi_mask] = angle[gt_pi_mask] - 2 * np.pi
+    angle[lt_minus_pi_mask] = angle[lt_minus_pi_mask] + 2 * np.pi
+
+    return angle
+
+
+def cal_angle_diff(angle1, angle2):
+    # angle is from x to y, anti-clockwise
+    angle1 = cor_angle_range(angle1)
+    angle2 = cor_angle_range(angle2)
+
+    diff = torch.abs(angle1 - angle2)
+    gt_pi_mask = diff > math.pi
+    diff[gt_pi_mask] = 2 * math.pi - diff[gt_pi_mask]
+
+    return diff
