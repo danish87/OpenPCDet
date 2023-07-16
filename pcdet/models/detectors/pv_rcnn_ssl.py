@@ -185,6 +185,20 @@ class PVRCNN_SSL(Detector3DTemplate):
             # Total loss 
             loss = loss_rpn_cls + loss_rpn_box + loss_point + loss_rcnn_cls + loss_rcnn_box
 
+            # RCNN Entropy Regularization
+            if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RCNN_ENTROPY_REG", False):
+                lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RCNN_ENTROPY_REG_LAMBDA", 1.0)
+                rcnn_entropy = lambda_ * self.pv_rcnn.roi_head.calc_entropy()
+                tb_dict['rcnn_entropy'] = rcnn_entropy
+                loss+= rcnn_entropy
+
+            # RPN Entropy Regularization    
+            if self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("ENABLE_RPN_ENTROPY_REG", False):
+                lambda_=self.model_cfg.ROI_HEAD.LOSS_CONFIG.get("RPN_ENTROPY_REG_LAMBDA", 1.0)
+                rpn_entropy = lambda_ * self.pv_rcnn.dense_head.calc_entropy()
+                tb_dict['rpn_entropy'] = rpn_entropy
+                loss+= rpn_entropy # overall reduction in the average uncertainty across all classes
+
             # Fill the TB dict which is sent to the logger
             tb_dict_ = {}
             for key in tb_dict.keys():
