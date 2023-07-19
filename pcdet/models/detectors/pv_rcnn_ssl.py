@@ -10,6 +10,7 @@ from .detector3d_template import Detector3DTemplate
 from.pv_rcnn import PVRCNN
 from ...utils.stats_utils import PredQualityMetrics
 import torch.distributed as dist
+from ...utils.weighting_methods import build_thresholding_method
 
 '''
 Class to create object for PredQualityMetrics (in stats_utils.py)
@@ -34,6 +35,25 @@ class MetricRegistry(object):
     def tags(self):
         return self._tag_metrics.keys()
 
+class dynamicThreshRegistry(object):
+    def __init__(self, **kwargs):
+        self._tag_metrics = {}
+        self.dataset = kwargs.get('dataset', None)
+        self.model_cfg = kwargs.get('model_cfg', None)
+
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag in self._tag_metrics.keys():
+            metric = self._tag_metrics[tag]
+        else:
+            metric = build_thresholding_method(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            self._tag_metrics[tag] = metric
+        return metric
+    
+    def tags(self):
+        return self._tag_metrics.keys()
+    
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
         super().__init__(model_cfg=model_cfg, num_class=num_class, dataset=dataset)
@@ -56,6 +76,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.metric_registry = MetricRegistry(dataset=self.dataset, model_cfg=model_cfg)
+        self.thresh_registry = dynamicThreshRegistry(dataset=self.dataset, model_cfg=model_cfg)
         self._dict_map_ = {
                 'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
                 'iou_roi_gt': 'preds_iou_max',
@@ -106,13 +127,33 @@ class PVRCNN_SSL(Detector3DTemplate):
             # Store the original GTs (later used for analysis)
             ori_gt_boxes = batch_dict['gt_boxes']
 
+            """PL metrics before filtering"""
+            if self.model_cfg.ROI_HEAD.get("ENABLE_METRICS", False):
+                self.update_metrics_before_filtering(batch_dict, pred_dicts_ens, unlabeled_inds, labeled_inds)
+
             # Use teacher's predictions as pseudo labels - Filter them and then fill in the batch_dict
-            pseudo_boxes, pseudo_scores, _ = self._filter_pseudo_labels(pred_dicts_ens, unlabeled_inds)
+            pseudo_boxes, pseudo_scores, pseudo_sem_scores = self._filter_pseudo_labels(pred_dicts_ens, unlabeled_inds)
             self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, unlabeled_inds, labeled_inds)
 
             # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
             batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='gt_boxes')
 
+            """PL metrics after filtering"""
+            if self.model_cfg.ROI_HEAD.get("ENABLE_METRICS", False):
+                if 'pl_gt_metrics_after_filtering' in self.model_cfg.ROI_HEAD.METRICS_PRED_TYPES:
+
+                    ori_unlabeled_boxes_list = [ori_box for ori_box in ori_gt_boxes[unlabeled_inds, ...]]
+                    pseudo_boxes_list = [ps_box for ps_box in batch_dict['gt_boxes'][unlabeled_inds]]
+                    metric_inputs = {'preds': pseudo_boxes_list, 'pred_scores': pseudo_scores, 'roi_scores': pseudo_sem_scores,
+                             'ground_truths': ori_unlabeled_boxes_list}
+                    
+                    tag = f'pl_gt_metrics_after_filtering'
+                    metrics = self.metric_registry.get(tag)
+                    metrics.update(**metric_inputs)
+            
+            # Enable dynamic thresholding
+            if not self.model_cfg.ROI_HEAD.get("ENABLE_BASELINE", False):
+                batch_dict['thresh_registry'] = self.thresh_registry
             batch_dict['metric_registry'] = self.metric_registry
             batch_dict['ori_gt_boxes'] = ori_gt_boxes
             
@@ -294,8 +335,14 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             # Update all the required metrics 
             for key in self.metric_registry.tags():
-                metrics = self.compute_metrics(tag=key)
+                metrics = self.compute_metrics(self.metric_registry, tag=key)
                 tb_dict_.update(metrics)
+
+            # update dynamic thresh results
+            if not self.model_cfg.ROI_HEAD.get("ENABLE_BASELINE", False):
+                for key in self.thresh_registry.tags():
+                    metrics = self.compute_metrics(self.thresh_registry, tag=key)
+                    tb_dict_.update(metrics)
 
             if dist.is_initialized():
                 rank = os.getenv('RANK')
@@ -317,11 +364,40 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             return pred_dicts, recall_dicts, {}
 
+    def update_metrics_before_filtering(self, input_dict, pred_dict, unlabeled_inds, labeled_inds):
+        """
+        Recording PL vs GT statistics BEFORE filtering
+        """
+        if 'pl_gt_metrics_before_filtering' in self.model_cfg.ROI_HEAD.METRICS_PRED_TYPES:
+            pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores,*_ = self._unpack_predictions(
+                pred_dict, unlabeled_inds)
+            pseudo_boxes = [torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1) \
+                            for (pseudo_box, pseudo_label) in zip(pseudo_boxes, pseudo_labels)]
+
+            # Making consistent # of pseudo boxes in each batch
+            # NOTE: Need to store them in batch_dict in a new key, which can be removed later
+            input_dict['pseudo_boxes_prefilter'] = torch.zeros_like(input_dict['gt_boxes'])
+            self._fill_with_pseudo_labels(input_dict, pseudo_boxes, unlabeled_inds, labeled_inds,
+                                          key='pseudo_boxes_prefilter')
+
+            # apply student's augs on teacher's pseudo-boxes (w/o filtered)
+            batch_dict = self.apply_augmentation(input_dict, input_dict, unlabeled_inds, key='pseudo_boxes_prefilter')
+
+            tag = f'pl_gt_metrics_before_filtering'
+            metrics = self.metric_registry.get(tag)
+
+            preds_prefilter = [batch_dict['pseudo_boxes_prefilter'][uind] for uind in unlabeled_inds]
+            gts_prefilter = [batch_dict['gt_boxes'][uind] for uind in unlabeled_inds]
+            metric_inputs = {'preds': preds_prefilter, 'pred_scores': pseudo_scores, 'roi_scores': pseudo_sem_scores,
+                             'ground_truths': gts_prefilter}
+            metrics.update(**metric_inputs)
+            batch_dict.pop('pseudo_boxes_prefilter')
+
     '''
     Wrapper function to compute all the metrics
     '''
-    def compute_metrics(self, tag):
-        results = self.metric_registry.get(tag).compute()
+    def compute_metrics(self, registry, tag):
+        results = registry.get(tag).compute()
         tag = tag + "/" if tag else ''
         metrics = {tag + key: val for key, val in results.items()}
 

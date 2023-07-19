@@ -56,7 +56,8 @@ class PredQualityMetrics(Metric):
     This function is called before the loss computation for every iteration.
     '''
     def update(self, preds: [torch.Tensor], ground_truths: [torch.Tensor], pred_scores: [torch.Tensor],
-               roi_scores=None, target_scores=None, pred_weights=None, pseudo_labels=None, pred_iou_wrt_pl=None) -> None:
+               roi_scores=None, target_scores=None, pred_weights=None, pseudo_labels=None, 
+               pred_iou_wrt_pl=None, roi_iou_pl_dynamic_thresh=None) -> None:
         
         # Check input types and dimensions
         assert isinstance(preds, list) and isinstance(ground_truths, list) and isinstance(pred_scores, list)
@@ -190,7 +191,11 @@ class PredQualityMetrics(Metric):
 
                     if valid_pred_iou_wrt_pl is not None:
                         # classwise local foreground threshold used in IoU target assignment (0.65,0.45,0.4 for Car,Ped,Cyc)
-                        fg_threshs = self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_FG_THRESH
+                        #fg_threshs = self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_FG_THRESH
+                        if roi_iou_pl_dynamic_thresh is None:
+                            fg_threshs = self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_FG_THRESH
+                        else:
+                            fg_threshs=roi_iou_pl_dynamic_thresh
                         bg_thresh = self.config.ROI_HEAD.TARGET_CONFIG.UNLABELED_CLS_BG_THRESH  # 0.25 for all classes
                         classwise_fg_thresh = fg_threshs[cind]
                         

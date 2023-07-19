@@ -161,8 +161,21 @@ MODEL:
     ROI_HEAD:
         NAME: PVRCNNHead
         CLASS_AGNOSTIC: True
+        METRICS_PRED_TYPES: [] #[pred_pl, pl_gt_metrics_before_filtering, pl_gt_metrics_after_filtering, pred_gt, roi_pl_gt]
         ENABLE_METRICS: False
         ENABLE_BASELINE: False
+        ADAPTIVE_THRESH_CONFIG:
+            NAME: AdaptiveThresholdGMM
+            ENABLE: False
+            PERCENT: 0.1
+            MOMENTUM: 0.9
+            PRE_FILTERING_THRESH: 0.1
+            RESET_STATE_INTERVAL: 32
+            ENABLE_PLOTS: False
+            ENABLE_CLIPPING: False
+            GMM_POLICY: high
+            MU1: 0.1
+            MU2: 0.9
         SHARED_FC: [256, 256]
         CLS_FC: [256, 256]
         REG_FC: [256, 256]

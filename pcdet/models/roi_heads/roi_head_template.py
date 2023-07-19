@@ -164,6 +164,18 @@ class RoIHeadTemplate(nn.Module):
                         'pred_iou_wrt_pl': sample_gt_iou_of_rois}
         metrics.update(**metric_inputs)
 
+
+        if 'thresh_registry' in targets_dict and 'roi_iou_pl_adaptive_thresh' in targets_dict['thresh_registry'].tags(): 
+            roi_iou_pl_dynamic_thresh = targets_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh').iou_local_thresholds.tolist()
+            tag = f'rcnn_roi_pl_gt_adaptive_thr'
+            metrics = metric_registry.get(tag)
+            metric_inputs = {'preds': sample_rois, 'pred_scores': sample_roi_scores,
+                    'ground_truths': sample_gts, 'pseudo_labels': sample_pls,
+                    'target_scores': sample_target_scores, 'pred_weights': sample_pred_weights,
+                    'pred_iou_wrt_pl': sample_gt_iou_of_rois,
+                    'roi_iou_pl_dynamic_thresh': roi_iou_pl_dynamic_thresh}      
+            metrics.update(**metric_inputs)
+
     def assign_targets(self, batch_dict):
 
         with torch.no_grad():
@@ -352,6 +364,9 @@ class RoIHeadTemplate(nn.Module):
     def get_loss(self, tb_dict=None, scalar=True):
         tb_dict = {} if tb_dict is None else tb_dict
 
+        if self.model_cfg.ADAPTIVE_THRESH_CONFIG.get('ENABLE', False):
+            self.update_adaptive_thresholding_metrics(self.forward_ret_dict, tag = 'roi_iou_pl_adaptive_thresh')
+
         # Get reliability weights for unlabeled samples 
         unlabeled_inds = self.forward_ret_dict['unlabeled_inds']
         self.forward_ret_dict['rcnn_cls_weights'][unlabeled_inds] = self._get_reliability_weight(unlabeled_inds)
@@ -400,3 +415,40 @@ class RoIHeadTemplate(nn.Module):
         batch_box_preds[:, 0:3] += roi_xyz
         batch_box_preds = batch_box_preds.view(batch_size, -1, code_size)
         return batch_cls_preds, batch_box_preds
+
+    def update_adaptive_thresholding_metrics(self, data_dict,  tag = 'roi_iou_pl_adaptive_thresh'):
+        
+        if 'thresh_registry' not in data_dict: return
+        thresh_registry = data_dict['thresh_registry']
+        adaptive_thresh = thresh_registry.get(tag) # NOTE Initialisation of threshold is after first subsampling step
+    
+        unlabeled_inds = data_dict['unlabeled_inds'] if 'unlabeled_inds' in data_dict else torch.tensor([], device=data_dict['roi_labels'].device)
+        labeled_inds=torch.tensor([i for i in range(data_dict['roi_labels'].shape[0]) if i not in unlabeled_inds], device=data_dict['roi_labels'].device)
+        
+        metric_inputs = {}
+        for metric_update_key in adaptive_thresh._update_signature.parameters.keys():
+            
+            metric_inputs[metric_update_key]=torch.tensor([]) # initalize with empty tensor
+            
+            if metric_update_key in ['unlab_roi_labels'] and 'roi_labels' in data_dict:
+                metric_inputs[metric_update_key] = data_dict['roi_labels'][unlabeled_inds].detach().clone()
+
+            elif metric_update_key in ['lab_roi_labels'] and 'roi_labels' in data_dict:
+                metric_inputs[metric_update_key] = data_dict['roi_labels'][labeled_inds].detach().clone()
+
+            elif metric_update_key in ['unlab_roi_scores' ] and 'roi_scores' in data_dict:
+                metric_inputs[metric_update_key] = torch.sigmoid(data_dict['roi_scores'])[unlabeled_inds].detach().clone() #rpn cls score
+
+            elif metric_update_key in ['lab_roi_scores' ] and 'roi_scores' in data_dict:
+                metric_inputs[metric_update_key] = torch.sigmoid(data_dict['roi_scores'])[labeled_inds].detach().clone() #rpn cls score
+
+            elif metric_update_key in ['unlab_gt_iou_of_rois'] and 'gt_iou_of_rois' in data_dict: # unlab_iou_wrt_pl
+                    metric_inputs[metric_update_key] = data_dict['gt_iou_of_rois'][unlabeled_inds].detach().clone()
+
+            elif metric_update_key in ['lab_gt_iou_of_rois'] and 'gt_iou_of_rois' in data_dict: # lab_iou_wrt_gt
+                metric_inputs[metric_update_key] = data_dict['gt_iou_of_rois'][labeled_inds].detach().clone()
+
+
+            if metric_inputs[metric_update_key].ndim == 1: metric_inputs[metric_update_key]=metric_inputs[metric_update_key].unsqueeze(dim=0)
+                
+        adaptive_thresh.update(**metric_inputs)

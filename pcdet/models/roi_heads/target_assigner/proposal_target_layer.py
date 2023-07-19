@@ -71,6 +71,13 @@ class ProposalTargetLayer(nn.Module):
         classwise_unlab_max_iou_bfs = {}
         classwise_unlab_max_iou_afs = {}
 
+        # Adaptive or Fixed threshold
+        batch_dict['iou_fg_thresh'] = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH 
+        if 'thresh_registry' in batch_dict:
+            if 'roi_iou_pl_adaptive_thresh' in batch_dict['thresh_registry'].tags(): 
+                    batch_dict['iou_fg_thresh'] = \
+                        batch_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh').iou_local_thresholds.tolist()
+
         for index in range(batch_size):
             cur_gt_boxes = batch_dict['gt_boxes'][index]
             k = cur_gt_boxes.__len__() - 1
@@ -181,7 +188,8 @@ class ProposalTargetLayer(nn.Module):
 
         # ---------- classification labels ---------- 
         # Fetch thresholds for ROIs based on classwise thresholds
-        cls_fg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH
+        #cls_fg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH
+        cls_fg_thresh = batch_dict['iou_fg_thresh']
         fg_thresh = roi_ious.new_tensor(cls_fg_thresh).reshape(1, -1,).repeat(*roi_ious.shape[:2], 1)
         cls_fg_thresh = torch.gather(fg_thresh, dim=-1, index=sampled_cur_roi_labels.unsqueeze(-1)).squeeze(-1)
         cls_bg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_BG_THRESH

@@ -155,9 +155,14 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['roi_scores'] = targets_dict['roi_scores']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
             # Temporarily add infos to targets_dict for metrics
-            targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
-            targets_dict['ori_gt_boxes'] = batch_dict['ori_gt_boxes']
-            targets_dict['metric_registry'] = batch_dict['metric_registry']
+            if 'unlabeled_inds' in batch_dict:
+                targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
+            if 'ori_gt_boxes' in batch_dict:
+                targets_dict['ori_gt_boxes'] = batch_dict['ori_gt_boxes']
+            if 'metric_registry' in batch_dict:
+                targets_dict['metric_registry'] = batch_dict['metric_registry']
+            if 'thresh_registry' in batch_dict:
+                targets_dict['thresh_registry'] = batch_dict['thresh_registry']
 
         # RoI aware pooling
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
