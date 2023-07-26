@@ -34,197 +34,215 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.sem_thresh = model_cfg.SEM_THRESH
         self.unlabeled_supervise_cls = model_cfg.UNLABELED_SUPERVISE_CLS
         self.unlabeled_supervise_refine = model_cfg.UNLABELED_SUPERVISE_REFINE
-        self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
+        #self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
+        self.max_unlabeled_weight = model_cfg.UNLABELED_WEIGHT
+        self.unlabeled_weight_ascent_list = model_cfg.UNSUPERVISE_ASCENT_LIST
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
 
     def forward(self, batch_dict):
         if self.training:
+            cur_iteration, cur_epoch, total_it_each_epoch = (batch_dict['cur_iteration'], 
+                                                             batch_dict['cur_epoch'], 
+                                                             batch_dict['total_it_each_epoch'])
+            
             labeled_mask = batch_dict['labeled_mask'].view(-1)
             labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long()
             unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long()
-            batch_dict_ema = {}
-            keys = list(batch_dict.keys())
-            for k in keys:
-                if k + '_ema' in keys:
-                    continue
-                if k.endswith('_ema'):
-                    batch_dict_ema[k[:-4]] = batch_dict[k]
-                else:
-                    batch_dict_ema[k] = batch_dict[k]
-
-            with torch.no_grad():
-                # self.pv_rcnn_ema.eval()  # Important! must be in train mode
-                for cur_module in self.pv_rcnn_ema.module_list:
-                    try:
-                        batch_dict_ema = cur_module(batch_dict_ema, disable_gt_roi_when_pseudo_labeling=True)
-                    except:
-                        batch_dict_ema = cur_module(batch_dict_ema)
-                pred_dicts, recall_dicts = self.pv_rcnn_ema.post_processing(batch_dict_ema,
-                                                                            no_recall_dict=True, override_thresh=0.0, no_nms=self.no_nms)
-
-                pseudo_boxes = []
-                pseudo_scores = []
-                pseudo_sem_scores = []
-                max_box_num = batch_dict['gt_boxes'].shape[1]
-                max_pseudo_box_num = 0
-                for ind in unlabeled_inds:
-                    pseudo_score = pred_dicts[ind]['pred_scores']
-                    pseudo_box = pred_dicts[ind]['pred_boxes']
-                    pseudo_label = pred_dicts[ind]['pred_labels']
-                    pseudo_sem_score = pred_dicts[ind]['pred_sem_scores']
-
-                    if len(pseudo_label) == 0:
-                        pseudo_boxes.append(pseudo_label.new_zeros((0, 8)).float())
-                        pseudo_sem_scores.append(pseudo_label.new_zeros((1,)).float())
-                        pseudo_scores.append(pseudo_label.new_zeros((1,)).float())
+            tb_dict_ = {}
+            disp_dict = {}
+            if cur_epoch > self.unlabeled_weight_ascent_list[0]:
+                batch_dict_ema = {}
+                keys = list(batch_dict.keys())
+                for k in keys:
+                    if k + '_ema' in keys:
                         continue
-
-
-                    conf_thresh = torch.tensor(self.thresh, device=pseudo_label.device).unsqueeze(
-                        0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label-1).unsqueeze(-1))
-
-                    valid_inds = pseudo_score > conf_thresh.squeeze()
-
-                    valid_inds = valid_inds * (pseudo_sem_score > self.sem_thresh[0])
-
-                    pseudo_sem_score = pseudo_sem_score[valid_inds]
-                    pseudo_box = pseudo_box[valid_inds]
-                    pseudo_label = pseudo_label[valid_inds]
-                    pseudo_score = pseudo_score[valid_inds]
-
-                    # if len(valid_inds) > max_box_num:
-                    #     _, inds = torch.sort(pseudo_score, descending=True)
-                    #     inds = inds[:max_box_num]
-                    #     pseudo_box = pseudo_box[inds]
-                    #     pseudo_label = pseudo_label[inds]
-
-                    pseudo_boxes.append(torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1))
-                    pseudo_sem_scores.append(pseudo_sem_score)
-                    pseudo_scores.append(pseudo_score)
-
-                    if pseudo_box.shape[0] > max_pseudo_box_num:
-                        max_pseudo_box_num = pseudo_box.shape[0]
-                    # pseudo_scores.append(pseudo_score)
-                    # pseudo_labels.append(pseudo_label)
-
-                max_box_num = batch_dict['gt_boxes'].shape[1]
-
-                # assert max_box_num >= max_pseudo_box_num
-                ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
-
-                if max_box_num >= max_pseudo_box_num:
-                    for i, pseudo_box in enumerate(pseudo_boxes):
-                        diff = max_box_num - pseudo_box.shape[0]
-                        if diff > 0:
-                            pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
-                        batch_dict['gt_boxes'][unlabeled_inds[i]] = pseudo_box
-                else:
-                    ori_boxes = batch_dict['gt_boxes']
-                    new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
-                                            device=ori_boxes.device)
-                    for i, inds in enumerate(labeled_inds):
-                        diff = max_pseudo_box_num - ori_boxes[inds].shape[0]
-                        new_box = torch.cat([ori_boxes[inds], torch.zeros((diff, 8), device=ori_boxes[inds].device)], dim=0)
-                        new_boxes[inds] = new_box
-                    for i, pseudo_box in enumerate(pseudo_boxes):
-
-                        diff = max_pseudo_box_num - pseudo_box.shape[0]
-                        if diff > 0:
-                            pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
-                        new_boxes[unlabeled_inds[i]] = pseudo_box
-                    batch_dict['gt_boxes'] = new_boxes
-
-                batch_dict['gt_boxes'][unlabeled_inds, ...] = random_flip_along_x_bbox(
-                    batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['flip_x'][unlabeled_inds, ...]
-                )
-
-                batch_dict['gt_boxes'][unlabeled_inds, ...] = random_flip_along_y_bbox(
-                    batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['flip_y'][unlabeled_inds, ...]
-                )
-
-                batch_dict['gt_boxes'][unlabeled_inds, ...] = global_rotation_bbox(
-                    batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['rot_angle'][unlabeled_inds, ...]
-                )
-
-                batch_dict['gt_boxes'][unlabeled_inds, ...] = global_scaling_bbox(
-                    batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['scale'][unlabeled_inds, ...]
-                )
-
-                pseudo_ious = []
-                pseudo_accs = []
-                pseudo_fgs = []
-                sem_score_fgs = []
-                sem_score_bgs = []
-                for i, ind in enumerate(unlabeled_inds):
-                    # statistics
-                    anchor_by_gt_overlap = iou3d_nms_utils.boxes_iou3d_gpu(
-                        batch_dict['gt_boxes'][ind, ...][:, 0:7],
-                        ori_unlabeled_boxes[i, :, 0:7])
-                    cls_pseudo = batch_dict['gt_boxes'][ind, ...][:, 7]
-                    unzero_inds = torch.nonzero(cls_pseudo).squeeze(1).long()
-                    cls_pseudo = cls_pseudo[unzero_inds]
-                    if len(unzero_inds) > 0:
-                        iou_max, asgn = anchor_by_gt_overlap[unzero_inds, :].max(dim=1)
-                        pseudo_ious.append(iou_max.mean().unsqueeze(dim=0))
-                        acc = (ori_unlabeled_boxes[i][:, 7].gather(dim=0, index=asgn) == cls_pseudo).float().mean()
-                        pseudo_accs.append(acc.unsqueeze(0))
-                        fg = (iou_max > 0.5).float().sum(dim=0, keepdim=True) / len(unzero_inds)
-
-                        sem_score_fg = (pseudo_sem_scores[i][unzero_inds] * (iou_max > 0.5).float()).sum(dim=0, keepdim=True) \
-                                       / torch.clamp((iou_max > 0.5).float().sum(dim=0, keepdim=True), min=1.0)
-                        sem_score_bg = (pseudo_sem_scores[i][unzero_inds] * (iou_max < 0.5).float()).sum(dim=0, keepdim=True) \
-                                       / torch.clamp((iou_max < 0.5).float().sum(dim=0, keepdim=True), min=1.0)
-                        pseudo_fgs.append(fg)
-                        sem_score_fgs.append(sem_score_fg)
-                        sem_score_bgs.append(sem_score_bg)
-
-                        # only for 100% label
-                        if self.supervise_mode >= 1:
-                            filter = iou_max > 0.3
-                            asgn = asgn[filter]
-                            batch_dict['gt_boxes'][ind, ...][:] = torch.zeros_like(batch_dict['gt_boxes'][ind, ...][:])
-                            batch_dict['gt_boxes'][ind, ...][:len(asgn)] = ori_unlabeled_boxes[i, :].gather(dim=0, index=asgn.unsqueeze(-1).repeat(1, 8))
-
-                            if self.supervise_mode == 2:
-                                batch_dict['gt_boxes'][ind, ...][:len(asgn), 0:3] += 0.1 * torch.randn((len(asgn), 3), device=iou_max.device) * \
-                                                                                     batch_dict['gt_boxes'][ind, ...][
-                                                                                     :len(asgn), 3:6]
-                                batch_dict['gt_boxes'][ind, ...][:len(asgn), 3:6] += 0.1 * torch.randn((len(asgn), 3), device=iou_max.device) * \
-                                                                                     batch_dict['gt_boxes'][ind, ...][
-                                                                                     :len(asgn), 3:6]
+                    if k.endswith('_ema'):
+                        batch_dict_ema[k[:-4]] = batch_dict[k]
                     else:
-                        nan = torch.tensor([float('nan')], device=unlabeled_inds.device)
-                        sem_score_fgs.append(nan)
-                        sem_score_bgs.append(nan)
-                        pseudo_ious.append(nan)
-                        pseudo_accs.append(nan)
-                        pseudo_fgs.append(nan)
+                        batch_dict_ema[k] = batch_dict[k]
 
+                with torch.no_grad():
+                    # self.pv_rcnn_ema.eval()  # Important! must be in train mode
+                    for cur_module in self.pv_rcnn_ema.module_list:
+                        try:
+                            batch_dict_ema = cur_module(batch_dict_ema, disable_gt_roi_when_pseudo_labeling=True)
+                        except:
+                            batch_dict_ema = cur_module(batch_dict_ema)
+                    pred_dicts, recall_dicts = self.pv_rcnn_ema.post_processing(batch_dict_ema,
+                                                                                no_recall_dict=True, override_thresh=0.0, no_nms=self.no_nms)
+
+                    pseudo_boxes = []
+                    pseudo_scores = []
+                    pseudo_sem_scores = []
+                    max_box_num = batch_dict['gt_boxes'].shape[1]
+                    max_pseudo_box_num = 0
+                    for ind in unlabeled_inds:
+                        pseudo_score = pred_dicts[ind]['pred_scores']
+                        pseudo_box = pred_dicts[ind]['pred_boxes']
+                        pseudo_label = pred_dicts[ind]['pred_labels']
+                        pseudo_sem_score = pred_dicts[ind]['pred_sem_scores']
+
+                        if len(pseudo_label) == 0:
+                            pseudo_boxes.append(pseudo_label.new_zeros((0, 8)).float())
+                            pseudo_sem_scores.append(pseudo_label.new_zeros((1,)).float())
+                            pseudo_scores.append(pseudo_label.new_zeros((1,)).float())
+                            continue
+
+
+                        conf_thresh = torch.tensor(self.thresh, device=pseudo_label.device).unsqueeze(
+                            0).repeat(len(pseudo_label), 1).gather(dim=1, index=(pseudo_label-1).unsqueeze(-1))
+
+                        valid_inds = pseudo_score > conf_thresh.squeeze()
+
+                        valid_inds = valid_inds * (pseudo_sem_score > self.sem_thresh[0])
+
+                        pseudo_sem_score = pseudo_sem_score[valid_inds]
+                        pseudo_box = pseudo_box[valid_inds]
+                        pseudo_label = pseudo_label[valid_inds]
+                        pseudo_score = pseudo_score[valid_inds]
+
+                        # if len(valid_inds) > max_box_num:
+                        #     _, inds = torch.sort(pseudo_score, descending=True)
+                        #     inds = inds[:max_box_num]
+                        #     pseudo_box = pseudo_box[inds]
+                        #     pseudo_label = pseudo_label[inds]
+
+                        pseudo_boxes.append(torch.cat([pseudo_box, pseudo_label.view(-1, 1).float()], dim=1))
+                        pseudo_sem_scores.append(pseudo_sem_score)
+                        pseudo_scores.append(pseudo_score)
+
+                        if pseudo_box.shape[0] > max_pseudo_box_num:
+                            max_pseudo_box_num = pseudo_box.shape[0]
+                        # pseudo_scores.append(pseudo_score)
+                        # pseudo_labels.append(pseudo_label)
+
+                    max_box_num = batch_dict['gt_boxes'].shape[1]
+
+                    # assert max_box_num >= max_pseudo_box_num
+                    ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+
+                    if max_box_num >= max_pseudo_box_num:
+                        for i, pseudo_box in enumerate(pseudo_boxes):
+                            diff = max_box_num - pseudo_box.shape[0]
+                            if diff > 0:
+                                pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                            batch_dict['gt_boxes'][unlabeled_inds[i]] = pseudo_box
+                    else:
+                        ori_boxes = batch_dict['gt_boxes']
+                        new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
+                                                device=ori_boxes.device)
+                        for i, inds in enumerate(labeled_inds):
+                            diff = max_pseudo_box_num - ori_boxes[inds].shape[0]
+                            new_box = torch.cat([ori_boxes[inds], torch.zeros((diff, 8), device=ori_boxes[inds].device)], dim=0)
+                            new_boxes[inds] = new_box
+                        for i, pseudo_box in enumerate(pseudo_boxes):
+
+                            diff = max_pseudo_box_num - pseudo_box.shape[0]
+                            if diff > 0:
+                                pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
+                            new_boxes[unlabeled_inds[i]] = pseudo_box
+                        batch_dict['gt_boxes'] = new_boxes
+
+                    batch_dict['gt_boxes'][unlabeled_inds, ...] = random_flip_along_x_bbox(
+                        batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['flip_x'][unlabeled_inds, ...]
+                    )
+
+                    batch_dict['gt_boxes'][unlabeled_inds, ...] = random_flip_along_y_bbox(
+                        batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['flip_y'][unlabeled_inds, ...]
+                    )
+
+                    batch_dict['gt_boxes'][unlabeled_inds, ...] = global_rotation_bbox(
+                        batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['rot_angle'][unlabeled_inds, ...]
+                    )
+
+                    batch_dict['gt_boxes'][unlabeled_inds, ...] = global_scaling_bbox(
+                        batch_dict['gt_boxes'][unlabeled_inds, ...], batch_dict['scale'][unlabeled_inds, ...]
+                    )
+
+                    pseudo_ious = []
+                    pseudo_accs = []
+                    pseudo_fgs = []
+                    sem_score_fgs = []
+                    sem_score_bgs = []
+                    for i, ind in enumerate(unlabeled_inds):
+                        # statistics
+                        anchor_by_gt_overlap = iou3d_nms_utils.boxes_iou3d_gpu(
+                            batch_dict['gt_boxes'][ind, ...][:, 0:7],
+                            ori_unlabeled_boxes[i, :, 0:7])
+                        cls_pseudo = batch_dict['gt_boxes'][ind, ...][:, 7]
+                        unzero_inds = torch.nonzero(cls_pseudo).squeeze(1).long()
+                        cls_pseudo = cls_pseudo[unzero_inds]
+                        if len(unzero_inds) > 0:
+                            iou_max, asgn = anchor_by_gt_overlap[unzero_inds, :].max(dim=1)
+                            pseudo_ious.append(iou_max.mean().unsqueeze(dim=0))
+                            acc = (ori_unlabeled_boxes[i][:, 7].gather(dim=0, index=asgn) == cls_pseudo).float().mean()
+                            pseudo_accs.append(acc.unsqueeze(0))
+                            fg = (iou_max > 0.5).float().sum(dim=0, keepdim=True) / len(unzero_inds)
+
+                            sem_score_fg = (pseudo_sem_scores[i][unzero_inds] * (iou_max > 0.5).float()).sum(dim=0, keepdim=True) \
+                                        / torch.clamp((iou_max > 0.5).float().sum(dim=0, keepdim=True), min=1.0)
+                            sem_score_bg = (pseudo_sem_scores[i][unzero_inds] * (iou_max < 0.5).float()).sum(dim=0, keepdim=True) \
+                                        / torch.clamp((iou_max < 0.5).float().sum(dim=0, keepdim=True), min=1.0)
+                            pseudo_fgs.append(fg)
+                            sem_score_fgs.append(sem_score_fg)
+                            sem_score_bgs.append(sem_score_bg)
+
+                            # only for 100% label
+                            if self.supervise_mode >= 1:
+                                filter = iou_max > 0.3
+                                asgn = asgn[filter]
+                                batch_dict['gt_boxes'][ind, ...][:] = torch.zeros_like(batch_dict['gt_boxes'][ind, ...][:])
+                                batch_dict['gt_boxes'][ind, ...][:len(asgn)] = ori_unlabeled_boxes[i, :].gather(dim=0, index=asgn.unsqueeze(-1).repeat(1, 8))
+
+                                if self.supervise_mode == 2:
+                                    batch_dict['gt_boxes'][ind, ...][:len(asgn), 0:3] += 0.1 * torch.randn((len(asgn), 3), device=iou_max.device) * \
+                                                                                        batch_dict['gt_boxes'][ind, ...][
+                                                                                        :len(asgn), 3:6]
+                                    batch_dict['gt_boxes'][ind, ...][:len(asgn), 3:6] += 0.1 * torch.randn((len(asgn), 3), device=iou_max.device) * \
+                                                                                        batch_dict['gt_boxes'][ind, ...][
+                                                                                        :len(asgn), 3:6]
+                        else:
+                            nan = torch.tensor([float('nan')], device=unlabeled_inds.device)
+                            sem_score_fgs.append(nan)
+                            sem_score_bgs.append(nan)
+                            pseudo_ious.append(nan)
+                            pseudo_accs.append(nan)
+                            pseudo_fgs.append(nan)
+                
+                tb_dict_['pseudo_ious'] = _mean(pseudo_ious)
+                tb_dict_['pseudo_accs'] = _mean(pseudo_accs)
+                tb_dict_['sem_score_fg'] = _mean(sem_score_fgs)
+                tb_dict_['sem_score_bg'] = _mean(sem_score_bgs)
+                tb_dict_['max_box_num'] = max_box_num
+                tb_dict_['max_pseudo_box_num'] = max_pseudo_box_num
+
+            
             for cur_module in self.pv_rcnn.module_list:
                 batch_dict = cur_module(batch_dict)
 
-            disp_dict = {}
+            
             loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
             loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
 
+            unlabeled_weight = self.calc_unlabeled_weight(cur_epoch)
             if not self.unlabeled_supervise_cls:
                 loss_rpn_cls = loss_rpn_cls[labeled_inds, ...].sum()
             else:
-                loss_rpn_cls = loss_rpn_cls[labeled_inds, ...].sum() + loss_rpn_cls[unlabeled_inds, ...].sum() * self.unlabeled_weight
+                loss_rpn_cls = loss_rpn_cls[labeled_inds, ...].sum() + loss_rpn_cls[unlabeled_inds, ...].sum() * unlabeled_weight
 
-            loss_rpn_box = loss_rpn_box[labeled_inds, ...].sum() + loss_rpn_box[unlabeled_inds, ...].sum() * self.unlabeled_weight
-            loss_point = loss_point[labeled_inds, ...].sum()
-            loss_rcnn_cls = loss_rcnn_cls[labeled_inds, ...].sum()
+            loss_rpn_box = loss_rpn_box[labeled_inds, ...].sum() + loss_rpn_box[unlabeled_inds, ...].sum() * unlabeled_weight
+            loss_point = loss_point[labeled_inds, ...].sum() + loss_point[unlabeled_inds, ...].sum() * 0.0 # sup comp minimization
+            loss_rcnn_cls = loss_rcnn_cls[labeled_inds, ...].sum() + loss_rcnn_cls[unlabeled_inds, ...].sum() * 0.0 # sup comp minimization
 
             if not self.unlabeled_supervise_refine:
                 loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum()
             else:
-                loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum() + loss_rcnn_box[unlabeled_inds, ...].sum() * self.unlabeled_weight
+                loss_rcnn_box = loss_rcnn_box[labeled_inds, ...].sum() + loss_rcnn_box[unlabeled_inds, ...].sum() * unlabeled_weight
 
             loss = loss_rpn_cls + loss_rpn_box + loss_point + loss_rcnn_cls + loss_rcnn_box
-            tb_dict_ = {}
+            
             for key in tb_dict.keys():
                 if 'loss' in key:
                     tb_dict_[key+"_labeled"] = tb_dict[key][labeled_inds, ...].sum()
@@ -237,15 +255,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                     tb_dict_[key + "_unlabeled"] = tb_dict[key][unlabeled_inds, ...].sum()
                 else:
                     tb_dict_[key] = tb_dict[key]
-
-            tb_dict_['pseudo_ious'] = _mean(pseudo_ious)
-            tb_dict_['pseudo_accs'] = _mean(pseudo_accs)
-            tb_dict_['sem_score_fg'] = _mean(sem_score_fgs)
-            tb_dict_['sem_score_bg'] = _mean(sem_score_bgs)
-
-            tb_dict_['max_box_num'] = max_box_num
-            tb_dict_['max_pseudo_box_num'] = max_pseudo_box_num
-
+            tb_dict_['unlabeled_weight']=unlabeled_weight
             ret_dict = {
                 'loss': loss
             }
@@ -270,11 +280,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def update_global_step(self):
         self.global_step += 1
-        alpha = 0.999
+        alpha = self.model_cfg.EMA_ALPHA
         # Use the true average until the exponential average is more correct
         alpha = min(1 - 1 / (self.global_step + 1), alpha)
         for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
-            ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
+            ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
 
     def load_params_from_file(self, filename, logger, to_cpu=False):
         if not os.path.isfile(filename):
@@ -310,3 +320,19 @@ class PVRCNN_SSL(Detector3DTemplate):
                 logger.info('Not updated weight %s: %s' % (key, str(state_dict[key].shape)))
 
         logger.info('==> Done (loaded %d/%d)' % (len(update_model_state), len(self.state_dict())))
+
+    def calc_unlabeled_weight(self, cur_epoch):
+        ascent_list = self.unlabeled_weight_ascent_list
+        max_unlabeled_weight = self.max_unlabeled_weight
+
+        if cur_epoch < ascent_list[0]:
+            return 0.0
+        elif cur_epoch >= ascent_list[-1]:
+            return max_unlabeled_weight
+        else:
+            for i in range(1, len(ascent_list)):
+                if cur_epoch < ascent_list[i]:
+                    alpha = (cur_epoch - ascent_list[i - 1]) / (ascent_list[i] - ascent_list[i - 1])
+                    return max_unlabeled_weight * (i - 1 + alpha) / len(ascent_list)
+
+
