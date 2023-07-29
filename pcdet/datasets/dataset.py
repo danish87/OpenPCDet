@@ -1,13 +1,14 @@
-from collections import defaultdict
+import torch
+import copy
 from pathlib import Path
-
+from collections import defaultdict
 import numpy as np
 import torch.utils.data as torch_data
-
-from ..utils import common_utils
 from .augmentor.data_augmentor import DataAugmentor
 from .processor.data_processor import DataProcessor
 from .processor.point_feature_encoder import PointFeatureEncoder
+from ..utils import common_utils, box_utils
+from ..ops.roiaware_pool3d import roiaware_pool3d_utils
 
 
 class DatasetTemplate(torch_data.Dataset):
@@ -74,6 +75,7 @@ class DatasetTemplate(torch_data.Dataset):
         Returns:
 
         """
+        raise NotImplementedError
 
     def merge_all_iters_to_one_epoch(self, merge=True, epochs=None):
         if merge:
@@ -103,7 +105,7 @@ class DatasetTemplate(torch_data.Dataset):
         """
         Args:
             data_dict:
-                points: optional, (N, 3 + C_in)
+                points: (N, 3 + C_in)
                 gt_boxes: optional, (N, 7 + C) [x, y, z, dx, dy, dz, heading, ...]
                 gt_names: optional, (N), string
                 ...
@@ -121,6 +123,20 @@ class DatasetTemplate(torch_data.Dataset):
                 ...
         """
         if self.training:
+            # filter gt_boxes without points
+            num_points_in_gt = data_dict.get('num_points_in_gt', None)
+            if num_points_in_gt is None:
+                num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(
+                    torch.from_numpy(data_dict['points'][:, :3]),
+                    torch.from_numpy(data_dict['gt_boxes'][:, :7])).numpy().sum(axis=1)
+
+            mask = (num_points_in_gt >= self.dataset_cfg.get('MIN_POINTS_OF_GT', 1))
+            data_dict['gt_boxes'] = data_dict['gt_boxes'][mask]
+            data_dict['gt_names'] = data_dict['gt_names'][mask]
+            if 'gt_classes' in data_dict:
+                data_dict['gt_classes'] = data_dict['gt_classes'][mask]
+                data_dict['gt_scores'] = data_dict['gt_scores'][mask]
+
             assert 'gt_boxes' in data_dict, 'gt_boxes should be provided for training'
             gt_boxes_mask = np.array([n in self.class_names for n in data_dict['gt_names']], dtype=np.bool_)
 
@@ -135,7 +151,12 @@ class DatasetTemplate(torch_data.Dataset):
             selected = common_utils.keep_arrays_by_name(data_dict['gt_names'], self.class_names)
             data_dict['gt_boxes'] = data_dict['gt_boxes'][selected]
             data_dict['gt_names'] = data_dict['gt_names'][selected]
-            gt_classes = np.array([self.class_names.index(n) + 1 for n in data_dict['gt_names']], dtype=np.int32)
+            # for pseudo label has ignore labels.
+            if 'gt_classes' not in data_dict:
+                gt_classes = np.array([self.class_names.index(n) + 1 for n in data_dict['gt_names']], dtype=np.int32)
+            else:
+                gt_classes = data_dict['gt_classes'][selected]
+                data_dict['gt_scores'] = data_dict['gt_scores'][selected]
             gt_boxes = np.concatenate((data_dict['gt_boxes'], gt_classes.reshape(-1, 1).astype(np.float32)), axis=1)
             data_dict['gt_boxes'] = gt_boxes
 
@@ -154,6 +175,7 @@ class DatasetTemplate(torch_data.Dataset):
             return self.__getitem__(new_index)
 
         data_dict.pop('gt_names', None)
+        data_dict.pop('gt_classes', None)
 
         return data_dict
 
@@ -168,20 +190,26 @@ class DatasetTemplate(torch_data.Dataset):
 
         for key, val in data_dict.items():
             try:
-                if key in ['voxels', 'voxel_num_points', 'voxels_ema', 'voxel_num_points_ema']:
+                if key in ['voxels', 'voxel_num_points']:
                     ret[key] = np.concatenate(val, axis=0)
-                elif key in ['points', 'voxel_coords', 'points_ema', 'voxel_coords_ema']:
+                elif key in ['points', 'voxel_coords']:
                     coors = []
                     for i, coor in enumerate(val):
                         coor_pad = np.pad(coor, ((0, 0), (1, 0)), mode='constant', constant_values=i)
                         coors.append(coor_pad)
                     ret[key] = np.concatenate(coors, axis=0)
-                elif key in ['gt_boxes', 'gt_boxes_ema']:
+                elif key in ['gt_boxes']:
                     max_gt = max([len(x) for x in val])
                     batch_gt_boxes3d = np.zeros((batch_size, max_gt, val[0].shape[-1]), dtype=np.float32)
                     for k in range(batch_size):
                         batch_gt_boxes3d[k, :val[k].__len__(), :] = val[k]
                     ret[key] = batch_gt_boxes3d
+                elif key in ['gt_scores']:
+                    max_gt = max([len(x) for x in val])
+                    batch_scores = np.zeros((batch_size, max_gt), dtype=np.float32)
+                    for k in range(batch_size):
+                        batch_scores[k, :val[k].__len__()] = val[k]
+                    ret[key] = batch_scores
                 elif key in ['gt_boxes2d']:
                     max_boxes = 0
                     max_boxes = max([len(x) for x in val])
@@ -227,3 +255,11 @@ class DatasetTemplate(torch_data.Dataset):
 
         ret['batch_size'] = batch_size
         return ret
+
+    def eval(self):
+        self.training = False
+        self.data_processor.eval()
+
+    def train(self):
+        self.training = True
+        self.data_processor.train()

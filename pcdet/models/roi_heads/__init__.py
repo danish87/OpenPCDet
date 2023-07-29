@@ -4,12 +4,14 @@ from .pvrcnn_head import PVRCNNHead
 from .second_head import SECONDHead
 from .voxelrcnn_head import VoxelRCNNHead
 from .roi_head_template import RoIHeadTemplate
+from .pvrcnn_head_semi import PVRCNNHeadSemi
 
 
 __all__ = {
     'RoIHeadTemplate': RoIHeadTemplate,
     'PartA2FCHead': PartA2FCHead,
     'PVRCNNHead': PVRCNNHead,
+    'PVRCNNHeadSemi':PVRCNNHeadSemi,
     'SECONDHead': SECONDHead,
     'PointRCNNHead': PointRCNNHead,
     'VoxelRCNNHead': VoxelRCNNHead

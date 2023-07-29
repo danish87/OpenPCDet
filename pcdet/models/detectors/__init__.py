@@ -3,20 +3,20 @@ from .PartA2_net import PartA2Net
 from .point_rcnn import PointRCNN
 from .pointpillar import PointPillar
 from .pv_rcnn import PVRCNN
-from .pv_rcnn_ssl import PVRCNN_SSL
 from .second_net import SECONDNet
 from .second_net_iou import SECONDNetIoU
 from .caddn import CaDDN
 from .voxel_rcnn import VoxelRCNN
 from .centerpoint import CenterPoint
 from .pv_rcnn_plusplus import PVRCNNPlusPlus
+from .pv_rcnn import SemiPVRCNN
 
 __all__ = {
     'Detector3DTemplate': Detector3DTemplate,
     'SECONDNet': SECONDNet,
     'PartA2Net': PartA2Net,
     'PVRCNN': PVRCNN,
-    'PVRCNN_SSL': PVRCNN_SSL,
+    'SemiPVRCNN': SemiPVRCNN,
     'PointPillar': PointPillar,
     'PointRCNN': PointRCNN,
     'SECONDNetIoU': SECONDNetIoU,

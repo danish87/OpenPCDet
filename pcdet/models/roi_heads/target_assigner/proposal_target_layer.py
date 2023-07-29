@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
 from ....ops.iou3d_nms import iou3d_nms_utils
 
 
@@ -51,6 +50,8 @@ class ProposalTargetLayer(nn.Module):
             batch_cls_labels = (fg_mask > 0).float()
             batch_cls_labels[interval_mask] = \
                 (batch_roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)
+        elif self.roi_sampler_cfg.CLS_SCORE_TYPE == 'raw_roi_iou':
+            batch_cls_labels = batch_roi_ious
         else:
             raise NotImplementedError
 
@@ -102,6 +103,7 @@ class ProposalTargetLayer(nn.Module):
                 )
             else:
                 iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt[:, 0:7])  # (M, N)
+                #iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi[:, 0:7], cur_gt[:, 0:7])  #modified: cur_roi->cur_roi[:, 0:7]
                 max_overlaps, gt_assignment = torch.max(iou3d, dim=1)
 
             sampled_inds = self.subsample_rois(max_overlaps=max_overlaps)
@@ -119,8 +121,8 @@ class ProposalTargetLayer(nn.Module):
         fg_rois_per_image = int(np.round(self.roi_sampler_cfg.FG_RATIO * self.roi_sampler_cfg.ROI_PER_IMAGE))
         fg_thresh = min(self.roi_sampler_cfg.REG_FG_THRESH, self.roi_sampler_cfg.CLS_FG_THRESH)
 
-        fg_inds = ((max_overlaps >= fg_thresh)).nonzero().view(-1)  # > 0.55
-        easy_bg_inds = ((max_overlaps < self.roi_sampler_cfg.CLS_BG_THRESH_LO)).nonzero().view(-1)  # < 0.1
+        fg_inds = ((max_overlaps >= fg_thresh)).nonzero().view(-1)
+        easy_bg_inds = ((max_overlaps < self.roi_sampler_cfg.CLS_BG_THRESH_LO)).nonzero().view(-1)
         hard_bg_inds = ((max_overlaps < self.roi_sampler_cfg.REG_FG_THRESH) &
                 (max_overlaps >= self.roi_sampler_cfg.CLS_BG_THRESH_LO)).nonzero().view(-1)
 
@@ -154,11 +156,9 @@ class ProposalTargetLayer(nn.Module):
                 hard_bg_inds, easy_bg_inds, bg_rois_per_this_image, self.roi_sampler_cfg.HARD_BG_RATIO
             )
         else:
-            print('Failed Subsample ROI for FG=%d, BG=%d \n enabling TopK selection' % (fg_num_rois, bg_num_rois))
-            fg_rois_per_image = int(np.round(self.roi_sampler_cfg.FG_RATIO * self.roi_sampler_cfg.ROI_PER_IMAGE))
-            bg_rois_per_image = self.roi_sampler_cfg.ROI_PER_IMAGE - fg_rois_per_image
-            _, sampled_inds = torch.topk(max_overlaps, k=fg_rois_per_image + bg_rois_per_image)
-            return sampled_inds
+            print('maxoverlaps:(min=%f, max=%f)' % (max_overlaps.min().item(), max_overlaps.max().item()))
+            print('ERROR: FG=%d, BG=%d' % (fg_num_rois, bg_num_rois))
+            raise NotImplementedError
 
         sampled_inds = torch.cat((fg_inds, bg_inds), dim=0)
         return sampled_inds
@@ -223,6 +223,7 @@ class ProposalTargetLayer(nn.Module):
                 original_gt_assignment = gt_mask.nonzero().view(-1)
 
                 iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi, cur_gt)  # (M, N)
+                #iou3d = iou3d_nms_utils.boxes_iou3d_gpu(cur_roi[:, 0:7], cur_gt)  #modified: cur_roi->cur_roi[:, 0:7]
                 cur_max_overlaps, cur_gt_assignment = torch.max(iou3d, dim=1)
                 max_overlaps[roi_mask] = cur_max_overlaps
                 gt_assignment[roi_mask] = original_gt_assignment[cur_gt_assignment]

@@ -75,6 +75,19 @@ class DataProcessor(object):
             cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)
             self.data_processor_queue.append(cur_processor)
 
+    # copy from lidar distill
+    def mask_boxes_outside_length(self, data_dict=None, config=None):
+        if data_dict is None:
+            return partial(self.mask_boxes_outside_length, config=config)
+
+        min_mask = data_dict['gt_boxes'][:, 3] >= config['LENGTH_RANGE'][0]
+        max_mask = data_dict['gt_boxes'][:, 3] <= config['LENGTH_RANGE'][1]
+        mask = min_mask & max_mask
+
+        data_dict['gt_boxes'] = data_dict['gt_boxes'][mask]
+
+        return data_dict
+
     def mask_points_and_boxes_outside_range(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.mask_points_and_boxes_outside_range, config=config)
@@ -101,6 +114,16 @@ class DataProcessor(object):
             data_dict['points'] = points
 
         return data_dict
+
+    def points_coord_learnable_transform(self, data_dict=None, config=None):
+        # We want to perform the alignment operation of point coodrinates
+        # before the network inference 
+        if data_dict is None:
+            return partial(self.points_coord_learnable_transform, config=config)
+        if config.POINTS_TRANSFER and self.training:
+            points = data_dict['points']
+        
+        return NotImplementedError
 
     def transform_points_to_voxels_placeholder(self, data_dict=None, config=None):
         # just calculate grid size
@@ -142,6 +165,48 @@ class DataProcessor(object):
         data_dict['voxel_num_points'] = num_points
         return data_dict
 
+    def sample_points_by_voxels(self, data_dict=None, config=None, voxel_generator=None):
+        if data_dict is None:
+            grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
+            self.grid_size = np.round(grid_size).astype(np.int64)
+            self.voxel_size = config.VOXEL_SIZE
+
+            if self.voxel_generator is None:
+                voxel_generator = VoxelGeneratorWrapper(
+                    vsize_xyz=config.VOXEL_SIZE,
+                    coors_range_xyz=self.point_cloud_range,
+                    num_point_features=self.num_point_features,
+                    max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                    max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
+                )
+
+            return partial(self.sample_points_by_voxels, config=config)
+
+        num_points = config.NUM_POINTS[self.mode]
+        if num_points == -1:  # dynamic voxelization !
+            return data_dict
+
+        # voxelization
+        data_dict = self.transform_points_to_voxels(data_dict, config)
+        if config.get('SAMPLE_TYPE', 'raw') == 'mean_vfe':
+            voxels = data_dict['voxels']
+            voxel_num_points = data_dict['voxel_num_points']
+            a = voxels.sum(axis=1)
+            b = np.expand_dims(voxel_num_points, axis=1).repeat(voxels.shape[-1], axis=-1)
+            points = a / b
+
+        else: # defalt: 'raw'
+            points = data_dict['voxels'][:,0] # remain only one point per voxel
+
+        data_dict['points'] = points
+        # sampling
+        data_dict = self.sample_points(data_dict, config)
+        data_dict.pop('voxels')
+        data_dict.pop('voxel_coords')
+        data_dict.pop('voxel_num_points')
+
+        return data_dict
+
     def sample_points(self, data_dict=None, config=None):
         if data_dict is None:
             return partial(self.sample_points, config=config)
@@ -168,7 +233,8 @@ class DataProcessor(object):
         else:
             choice = np.arange(0, len(points), dtype=np.int32)
             if num_points > len(points):
-                extra_choice = np.random.choice(choice, num_points - len(points), replace=False)
+                #extra_choice = np.random.choice(choice, num_points - len(points), replace=False) #OpenPCD0.5.2 version
+                extra_choice = np.random.choice(choice, num_points - len(points)) #IA-SSD version
                 choice = np.concatenate((choice, extra_choice), axis=0)
             np.random.shuffle(choice)
         data_dict['points'] = points[choice]
@@ -209,3 +275,140 @@ class DataProcessor(object):
             data_dict = cur_processor(data_dict=data_dict)
 
         return data_dict
+
+    def eval(self):
+        self.training = False
+        self.mode = 'test'
+
+    def train(self):
+        self.training = True
+        self.mode = 'train'
+
+class PairDataProcessor(object):
+    def __init__(self, processor_configs, point_cloud_range, training, num_point_features):
+        self.point_cloud_range = point_cloud_range
+        self.training = training
+        self.num_point_features = num_point_features
+        self.mode = 'train' if training else 'test'
+        self.grid_size = self.voxel_size = None
+        self.data_processor_queue = []
+
+        self.voxel_generator = None
+
+        for cur_cfg in processor_configs:
+            cur_processor = getattr(self, cur_cfg.NAME)(config=cur_cfg)
+            self.data_processor_queue.append(cur_processor)
+
+
+    def mask_points_and_boxes_outside_range(self, data_dict_1=None, data_dict_2=None, config=None):
+        if data_dict_1 is None and data_dict_2 is None:
+            return partial(self.mask_points_and_boxes_outside_range, config=config)
+
+        if data_dict_1.get('points', None) is not None:
+            mask = common_utils.mask_points_by_range(data_dict_1['points'], self.point_cloud_range)
+            data_dict_1['points'] = data_dict_1['points'][mask]
+            data_dict_2['points'] = data_dict_2['points'][mask]
+        
+        if data_dict_2.get('points', None) is not None:
+            mask = common_utils.mask_points_by_range(data_dict_2['points'], self.point_cloud_range)
+            data_dict_2['points'] = data_dict_2['points'][mask]
+            data_dict_1['points'] = data_dict_1['points'][mask]
+
+        if data_dict_1.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
+            mask = box_utils.mask_boxes_outside_range_numpy(
+                data_dict_1['gt_boxes'], self.point_cloud_range, min_num_corners=config.get('min_num_corners', 1)
+            )
+            data_dict_1['gt_boxes'] = data_dict_1['gt_boxes'][mask]
+            data_dict_2['gt_boxes'] = data_dict_2['gt_boxes'][mask]
+        
+        if data_dict_2.get('gt_boxes', None) is not None and config.REMOVE_OUTSIDE_BOXES and self.training:
+            mask = box_utils.mask_boxes_outside_range_numpy(
+                data_dict_2['gt_boxes'], self.point_cloud_range, min_num_corners=config.get('min_num_corners', 1)
+            )
+            data_dict_2['gt_boxes'] = data_dict_2['gt_boxes'][mask]
+            data_dict_1['gt_boxes'] = data_dict_1['gt_boxes'][mask]
+
+        return data_dict_1, data_dict_2
+    
+    def shuffle_points(self, data_dict_1=None, data_dict_2=None, config=None):
+        if data_dict_1 is None and data_dict_2 is None:
+            return partial(self.shuffle_points, config=config)
+
+        if config.SHUFFLE_ENABLED[self.mode]:
+            points_1 = data_dict_1['points']
+            points_2 = data_dict_2['points']
+            assert points_1.shape[0] == points_2.shape[0]
+            shuffle_idx = np.random.permutation(points_1.shape[0])
+            points_1 = points_1[shuffle_idx]
+            points_2 = points_2[shuffle_idx]
+            data_dict_1['points'] = points_1
+            data_dict_2['points'] = points_2
+
+        return data_dict_1, data_dict_2
+
+        
+    def transform_points_to_voxels(self, data_dict_1=None, data_dict_2=None, config=None):
+        if data_dict_1 is None and data_dict_2 is None:
+            grid_size = (self.point_cloud_range[3:6] - self.point_cloud_range[0:3]) / np.array(config.VOXEL_SIZE)
+            self.grid_size = np.round(grid_size).astype(np.int64)
+            self.voxel_size = config.VOXEL_SIZE
+            # just bind the config, we will create the VoxelGeneratorWrapper later,
+            # to avoid pickling issues in multiprocess spawn
+            return partial(self.transform_points_to_voxels, config=config)
+
+        if self.voxel_generator is None:
+            self.voxel_generator = VoxelGeneratorWrapper(
+                vsize_xyz=config.VOXEL_SIZE,
+                coors_range_xyz=self.point_cloud_range,
+                num_point_features=self.num_point_features,
+                max_num_points_per_voxel=config.MAX_POINTS_PER_VOXEL,
+                max_num_voxels=config.MAX_NUMBER_OF_VOXELS[self.mode],
+            )
+
+        points = data_dict_1['points']
+        voxel_output = self.voxel_generator.generate(points)
+        voxels, coordinates, num_points = voxel_output
+
+        if not data_dict_1['use_lead_xyz']:
+            voxels = voxels[..., 3:]  # remove xyz in voxels(N, 3)
+
+        data_dict_1['voxels'] = voxels
+        data_dict_1['voxel_coords'] = coordinates
+        data_dict_1['voxel_num_points'] = num_points
+
+        points = data_dict_2['points']
+        voxel_output = self.voxel_generator.generate(points)
+        voxels, coordinates, num_points = voxel_output
+
+        if not data_dict_1['use_lead_xyz']:
+            voxels = voxels[..., 3:]  # remove xyz in voxels(N, 3)
+
+        data_dict_2['voxels'] = voxels
+        data_dict_2['voxel_coords'] = coordinates
+        data_dict_2['voxel_num_points'] = num_points
+        return data_dict_1, data_dict_2
+
+    def forward(self, data_dict_1, data_dict_2):
+        """
+        Args:
+            data_dict:
+                points: (N, 3 + C_in)
+                gt_boxes: optional, (N, 7 + C) [x, y, z, dx, dy, dz, heading, ...]
+                gt_names: optional, (N), string
+                ...
+
+        Returns:
+        """
+
+        for cur_processor in self.data_processor_queue:
+            data_dict_1, data_dict_2 = cur_processor(data_dict_1=data_dict_1, data_dict_2=data_dict_2)
+
+        return data_dict_1, data_dict_2
+
+    def eval(self):
+        self.training = False
+        self.mode = 'test'
+
+    def train(self):
+        self.training = True
+        self.mode = 'train'
