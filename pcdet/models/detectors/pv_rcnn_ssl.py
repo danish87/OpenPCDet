@@ -1,5 +1,5 @@
 import os
-
+import pickle
 import torch
 import copy
 
@@ -39,6 +39,21 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.unlabeled_weight_ascent_list = model_cfg.UNSUPERVISE_ASCENT_LIST
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
+        self._dict_map_ = {
+                'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
+                'iou_roi_gt': 'preds_iou_max',
+                'angle_diff': 'batch_angle_diff[batch_index]',
+                'center_dist': 'batch_center_dist[batch_index]',
+                'iteration': 'cur_iteration',
+                'roi_labels': 'batch_roi_labels[batch_index]',
+                'roi_scores': 'batch_roi_score[batch_index]',
+                'raw_roi_scores': 'batch_raw_roi_score[batch_index]',
+                'pred_scores': 'batch_pred_score[batch_index]',
+                'raw_pred_scores': 'batch_raw_pred_score[batch_index]',
+                'target_labels': 'batch_target_labels[batch_index]'
+            }
+        self.val_lbd_dict = {val: [] for val in self._dict_map_.keys()}
+        self.val_unlbd_dict = {val: [] for val in self._dict_map_.keys()}
 
     def forward(self, batch_dict):
         if self.training:
@@ -51,6 +66,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long()
             tb_dict_ = {}
             disp_dict = {}
+            ori_gt_boxes = batch_dict['gt_boxes']
+            
             if cur_epoch > self.unlabeled_weight_ascent_list[0]:
                 batch_dict_ema = {}
                 keys = list(batch_dict.keys())
@@ -120,7 +137,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                     max_box_num = batch_dict['gt_boxes'].shape[1]
 
                     # assert max_box_num >= max_pseudo_box_num
-                    ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
+                    #ori_unlabeled_boxes = batch_dict['gt_boxes'][unlabeled_inds, ...]
 
                     if max_box_num >= max_pseudo_box_num:
                         for i, pseudo_box in enumerate(pseudo_boxes):
@@ -169,14 +186,14 @@ class PVRCNN_SSL(Detector3DTemplate):
                         # statistics
                         anchor_by_gt_overlap = iou3d_nms_utils.boxes_iou3d_gpu(
                             batch_dict['gt_boxes'][ind, ...][:, 0:7],
-                            ori_unlabeled_boxes[i, :, 0:7])
+                            ori_gt_boxes[unlabeled_inds, ...][i, :, 0:7])
                         cls_pseudo = batch_dict['gt_boxes'][ind, ...][:, 7]
                         unzero_inds = torch.nonzero(cls_pseudo).squeeze(1).long()
                         cls_pseudo = cls_pseudo[unzero_inds]
                         if len(unzero_inds) > 0:
                             iou_max, asgn = anchor_by_gt_overlap[unzero_inds, :].max(dim=1)
                             pseudo_ious.append(iou_max.mean().unsqueeze(dim=0))
-                            acc = (ori_unlabeled_boxes[i][:, 7].gather(dim=0, index=asgn) == cls_pseudo).float().mean()
+                            acc = (ori_gt_boxes[unlabeled_inds, ...][i][:, 7].gather(dim=0, index=asgn) == cls_pseudo).float().mean()
                             pseudo_accs.append(acc.unsqueeze(0))
                             fg = (iou_max > 0.5).float().sum(dim=0, keepdim=True) / len(unzero_inds)
 
@@ -193,7 +210,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                                 filter = iou_max > 0.3
                                 asgn = asgn[filter]
                                 batch_dict['gt_boxes'][ind, ...][:] = torch.zeros_like(batch_dict['gt_boxes'][ind, ...][:])
-                                batch_dict['gt_boxes'][ind, ...][:len(asgn)] = ori_unlabeled_boxes[i, :].gather(dim=0, index=asgn.unsqueeze(-1).repeat(1, 8))
+                                batch_dict['gt_boxes'][ind, ...][:len(asgn)] = ori_gt_boxes[unlabeled_inds, ...][i, :].gather(dim=0, index=asgn.unsqueeze(-1).repeat(1, 8))
 
                                 if self.supervise_mode == 2:
                                     batch_dict['gt_boxes'][ind, ...][:len(asgn), 0:3] += 0.1 * torch.randn((len(asgn), 3), device=iou_max.device) * \
@@ -226,7 +243,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
             loss_rcnn_cls, loss_rcnn_box, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
 
-            unlabeled_weight = self.calc_unlabeled_weight(cur_epoch)
+            unlabeled_weight = self.calc_smooth_unlabeled_weight(cur_epoch)
             if not self.unlabeled_supervise_cls:
                 loss_rpn_cls = loss_rpn_cls[labeled_inds, ...].sum()
             else:
@@ -259,6 +276,85 @@ class PVRCNN_SSL(Detector3DTemplate):
             ret_dict = {
                 'loss': loss
             }
+
+            if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
+                # iter wise
+                for tag_ in ['classwise_unlab_max_iou_bfs', 'classwise_unlab_max_iou_afs', 'classwise_lab_max_iou_bfs', 'classwise_lab_max_iou_afs']:
+                    iter_name_ =  f'{tag_}_iteration'
+                    if not (tag_ in self.pv_rcnn.roi_head.forward_ret_dict and self.pv_rcnn.roi_head.forward_ret_dict[tag_]): continue
+                    cur_iteration = torch.ones_like(self.pv_rcnn.roi_head.forward_ret_dict[tag_][0]) * (batch_dict['cur_iteration'])
+                    if 'unlab' in tag_:
+                        if not iter_name_ in self.val_unlbd_dict:
+                            self.val_unlbd_dict[iter_name_]=[]
+                        self.val_unlbd_dict[iter_name_].extend(cur_iteration.tolist())
+                    else:
+                        if not iter_name_ in self.val_lbd_dict:
+                            self.val_lbd_dict[iter_name_]=[]
+                        self.val_lbd_dict[iter_name_].extend(cur_iteration.tolist())
+
+                    for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_].items():
+                        name_ = f'{tag_}_{self.dataset.class_names[key]}'
+                        if 'unlab' in tag_:
+                            if not name_ in self.val_unlbd_dict:
+                                self.val_unlbd_dict[name_]=[]
+                            self.val_unlbd_dict[name_].extend(val.tolist())
+                        else:
+                            if not name_ in self.val_lbd_dict:
+                                self.val_lbd_dict[name_]=[]
+                            self.val_lbd_dict[name_].extend(val.tolist())
+                
+                # batch wise
+                batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].detach().clone()
+                batch_rois = self.pv_rcnn.roi_head.forward_ret_dict['rois'].detach().clone()
+                batch_ori_gt_boxes = self.pv_rcnn.roi_head.forward_ret_dict['ori_gt_boxes'].detach().clone() if 'ori_gt_boxes' in  self.pv_rcnn.roi_head.forward_ret_dict else ori_gt_boxes
+                batch_iou_roi_pl = self.pv_rcnn.roi_head.forward_ret_dict['gt_iou_of_rois'].detach().clone()
+                
+                batch_center_dist = self.pv_rcnn.roi_head.forward_ret_dict['center_dist'].detach().clone()
+                batch_angle_diff = self.pv_rcnn.roi_head.forward_ret_dict['angle_diff'].detach().clone()
+
+                batch_raw_roi_score =  self.pv_rcnn.roi_head.forward_ret_dict['roi_scores'].detach().clone()
+                batch_roi_score =  torch.sigmoid(batch_raw_roi_score)
+                
+                
+                batch_raw_pred_score = batch_dict['batch_cls_preds'].detach().clone().squeeze()
+                batch_pred_score = torch.sigmoid(batch_raw_pred_score)
+                batch_target_labels = self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_labels'].detach().clone()
+
+
+                
+                for batch_index in range(len(batch_rois)):
+                    valid_rois_mask = torch.logical_not(torch.all(batch_rois[batch_index] == 0, dim=-1))
+                    valid_rois = batch_rois[batch_index][valid_rois_mask]
+                    valid_roi_labels = batch_roi_labels[batch_index][valid_rois_mask]
+                    valid_roi_labels -= 1  
+
+                    valid_gt_boxes_mask = torch.logical_not(torch.all(batch_ori_gt_boxes[batch_index] == 0, dim=-1))
+                    valid_gt_boxes = batch_ori_gt_boxes[batch_index][valid_gt_boxes_mask]
+                    valid_gt_boxes[:, -1] -= 1  
+
+                    num_gts = valid_gt_boxes_mask.sum()
+                    num_preds = valid_rois_mask.sum()
+
+                    if num_gts > 0 and num_preds > 0:
+                        overlap = iou3d_nms_utils.boxes_iou3d_gpu(valid_rois[:, 0:7], valid_gt_boxes[:, 0:7])
+                        preds_iou_max, assigned_gt_inds = overlap.max(dim=1)
+                        cur_iteration = torch.ones_like(preds_iou_max) * (batch_dict['cur_iteration'])
+                        if batch_index in unlabeled_inds:
+                            for val, map_val in self._dict_map_.items():
+                                self.val_unlbd_dict[val].extend(eval(map_val).tolist())
+                        else:
+                            for val, map_val in self._dict_map_.items():
+                                self.val_lbd_dict[val].extend(eval(map_val).tolist())
+                
+                # print([(k,len(v)) for k, v in self.val_lbd_dict.items() if len(v) ])
+                # print([(k,len(v)) for k, v in self.val_unlbd_dict.items() if len(v) ])
+                
+                # replace old pickle data (if exists) with updated one 
+                output_dir = os.path.split(os.path.abspath(batch_dict['ckpt_save_dir']))[0]
+                pickle.dump(self.val_lbd_dict, open(os.path.join(output_dir, 'scores_lbd.pkl'), 'wb'))
+                pickle.dump(self.val_unlbd_dict, open(os.path.join(output_dir, 'scores_unlbd.pkl'), 'wb'))
+            
+
             return ret_dict, tb_dict_, disp_dict
 
         else:
@@ -335,4 +431,18 @@ class PVRCNN_SSL(Detector3DTemplate):
                     alpha = (cur_epoch - ascent_list[i - 1]) / (ascent_list[i] - ascent_list[i - 1])
                     return max_unlabeled_weight * (i - 1 + alpha) / len(ascent_list)
 
+    def calc_smooth_unlabeled_weight(self,cur_epoch):
+        ascent_list = self.unlabeled_weight_ascent_list
+        max_unlabeled_weight = self.max_unlabeled_weight
+        min_unlabeled_weight = 0.0
+        if cur_epoch < ascent_list[0]:
+            return min_unlabeled_weight
+        elif cur_epoch >= ascent_list[-1]:
+            return max_unlabeled_weight
+        else:
+            def sigmoid(x):
+                return 1 / (1 + np.exp(-x))
 
+            alpha = (cur_epoch - ascent_list[0]) / (ascent_list[-1] - ascent_list[0])
+            scaled_alpha = sigmoid(6 * (2 * alpha - 1))
+            return min_unlabeled_weight + scaled_alpha * (max_unlabeled_weight - min_unlabeled_weight)

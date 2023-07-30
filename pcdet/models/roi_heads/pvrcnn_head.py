@@ -151,7 +151,8 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict = self.assign_targets(batch_dict)
             batch_dict['rois'] = targets_dict['rois']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
-
+            if 'unlabeled_inds' in batch_dict:
+                targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
         # RoI aware pooling
         pooled_features = self.roi_grid_pool(batch_dict)  # (BxN, 6x6x6, C)
 
