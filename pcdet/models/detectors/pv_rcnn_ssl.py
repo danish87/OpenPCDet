@@ -67,7 +67,7 @@ class PVRCNN_SSL(Detector3DTemplate):
             tb_dict_ = {}
             disp_dict = {}
             ori_gt_boxes = batch_dict['gt_boxes']
-            
+            batch_dict['unlabeled_inds'] = unlabeled_inds
             if cur_epoch > self.unlabeled_weight_ascent_list[0]:
                 batch_dict_ema = {}
                 keys = list(batch_dict.keys())
@@ -376,9 +376,9 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def update_global_step(self):
         self.global_step += 1
-        alpha = self.model_cfg.EMA_ALPHA
+        # alpha = self.model_cfg.EMA_ALPHA
         # Use the true average until the exponential average is more correct
-        alpha = min(1 - 1 / (self.global_step + 1), alpha)
+        alpha = min(self.model_cfg.EMA_ALPHA, torch.sigmoid(6 * (2 * ((self.global_step - 100) / 1000) - 1))) 
         for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
             ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
 
@@ -440,9 +440,6 @@ class PVRCNN_SSL(Detector3DTemplate):
         elif cur_epoch >= ascent_list[-1]:
             return max_unlabeled_weight
         else:
-            def sigmoid(x):
-                return 1 / (1 + np.exp(-x))
-
             alpha = (cur_epoch - ascent_list[0]) / (ascent_list[-1] - ascent_list[0])
-            scaled_alpha = sigmoid(6 * (2 * alpha - 1))
+            scaled_alpha = torch.sigmoid(torch.tensor(6 * (2 * alpha - 1)))
             return min_unlabeled_weight + scaled_alpha * (max_unlabeled_weight - min_unlabeled_weight)
