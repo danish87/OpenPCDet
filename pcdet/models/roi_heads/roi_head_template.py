@@ -40,7 +40,7 @@ def update_metrics(targets_dict, mask_type='cls'):
         metrics_input['roi_target_scores'].append(target_scores)
 
         # (Real labels) GT info
-        gt_labeled_boxes = targets_dict['ori_unlabeled_boxes'][i]
+        gt_labeled_boxes = targets_dict['ori_gt_boxes'][uind]
         metrics_input['ground_truths'].append(gt_labeled_boxes)
 
         # RoI weights
