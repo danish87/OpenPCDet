@@ -9,9 +9,9 @@ from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
 from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
 
-import common_utils
-from stats_utils import metrics_registry
-from prototype_utils import feature_bank_registry
+from ...utils import common_utils
+from ...utils.stats_utils import metrics_registry
+from ...utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 from visual_utils import open3d_vis_utils as V
 
@@ -84,8 +84,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             # filter out gt instances with too few points when updating the bank
             num_points_in_gt = roiaware_pool3d_utils.points_in_boxes_cpu(points.cpu(), gt_boxes.cpu()).sum(dim=-1)
             valid_gts_mask = (num_points_in_gt >= bank.num_points_thresh)
-            print(f"{(~valid_gts_mask).sum()} gt instance(s) with id(s) {ins_idxs[~valid_gts_mask].tolist()}"
-                  f" and num points {num_points_in_gt[~valid_gts_mask].tolist()} are filtered")
+            # print(f"{(~valid_gts_mask).sum()} gt instance(s) with id(s) {ins_idxs[~valid_gts_mask].tolist()}"
+            #       f" and num points {num_points_in_gt[~valid_gts_mask].tolist()} are filtered")
             if valid_gts_mask.sum() == 0:
                 print(f"no valid gt instances with enough points in frame {batch_dict['frame_id'][i]}")
                 continue
