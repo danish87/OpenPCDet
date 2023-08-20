@@ -2,6 +2,8 @@ import argparse
 import datetime
 import glob
 import os
+os.environ['CUDA_VISIBLE_DEVICES']='1'
+os.environ['TORCH_USE_CUDA_DSA'] = '1'
 from pathlib import Path
 from test import repeat_eval_ckpt
 
@@ -83,7 +85,7 @@ def parse_config():
     cfg.MODEL.SEM_THRESH = [float(x) for x in args.sem_thresh.split(',')]
     cfg.MODEL.UNLABELED_SUPERVISE_CLS = args.unlabeled_supervise_cls
     cfg.MODEL.UNLABELED_SUPERVISE_REFINE = args.unlabeled_supervise_refine
-    cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
+    # cfg.MODEL.UNLABELED_WEIGHT = args.unlabeled_weight
     cfg.MODEL.NO_NMS = args.no_nms
     cfg.MODEL.SUPERVISE_MODE = args.supervise_mode
 

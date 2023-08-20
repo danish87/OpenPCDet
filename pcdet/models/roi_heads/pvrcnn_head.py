@@ -164,6 +164,8 @@ class PVRCNNHead(RoIHeadTemplate):
             targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
             targets_dict['ori_gt_boxes'] = batch_dict['ori_gt_boxes']
             targets_dict['points'] = batch_dict['points']
+            if 'thresh_registry' in batch_dict:
+                targets_dict['thresh_registry'] = batch_dict['thresh_registry']
 
         pooled_features = self.get_pooled_features(batch_dict)
         batch_size_rcnn = pooled_features.shape[0]

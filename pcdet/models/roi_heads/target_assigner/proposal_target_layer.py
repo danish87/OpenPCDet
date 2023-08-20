@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-
+import math
 from ....ops.iou3d_nms import iou3d_nms_utils
 
 
@@ -68,12 +68,22 @@ class ProposalTargetLayer(nn.Module):
 
         # Adaptive or Fixed threshold
         batch_dict['iou_fg_thresh'] = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH 
-        if 'thresh_registry' in batch_dict:
-            if 'roi_iou_pl_adaptive_thresh' in batch_dict['thresh_registry'].tags(): 
-                    batch_dict['iou_fg_thresh'] = \
-                        batch_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh').iou_local_thresholds.tolist()
+        if 'thresh_registry' in batch_dict and 'roi_iou_pl_adaptive_thresh' in batch_dict['thresh_registry'].tags(): 
+            batch_dict['iou_fg_thresh'] = \
+                batch_dict['thresh_registry'].get(tag='roi_iou_pl_adaptive_thresh').iou_local_thresholds.tolist()
+
         
-        subsample_unlabeled_rois = getattr(self, self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE, None)
+        # UNLABELED SUBSAMPLER : DEFAULT VS WITH-DYNAMIC THRESHOLDING
+        subsample_unlabeled_rois = getattr(self, self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE, None) \
+            if 'UNLABELED_SAMPLER_TYPE' in self.roi_sampler_cfg else None
+        # LABELED SUBSAMPLER : DEFAULT VS WITH-DYNAMIC THRESHOLDING
+        subsample_labeled_rois = getattr(self, self.roi_sampler_cfg.LABELED_SAMPLER_TYPE, None) \
+            if 'LABELED_SAMPLER_TYPE' in self.roi_sampler_cfg else None
+        
+        if subsample_unlabeled_rois is None:
+            subsample_unlabeled_rois = self.subsample_unlabeled_rois_default
+        if subsample_labeled_rois is None:
+            subsample_labeled_rois = self.subsample_labeled_rois
 
         for index in range(batch_size):
             # TODO(farzad) WARNING!!! The index for cur_gt_boxes was missing and caused an error. FIX this in other branches.
@@ -85,14 +95,14 @@ class ProposalTargetLayer(nn.Module):
             cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(
                 cur_gt_boxes) == 0 else cur_gt_boxes
 
-            if index in batch_dict['unlabeled_inds'] and subsample_unlabeled_rois is not None:
+            if index in batch_dict['unlabeled_inds']:
                 sampled_inds, cur_reg_valid_mask, cur_cls_labels, \
                     roi_ious, gt_assignment, cur_interval_mask, \
                         center_distance, angle_diff, max_overlaps = subsample_unlabeled_rois(batch_dict, index)
             else:
                 sampled_inds, cur_reg_valid_mask, cur_cls_labels, \
                     roi_ious, gt_assignment, cur_interval_mask, \
-                        center_distance, angle_diff, max_overlaps = self.subsample_labeled_rois(batch_dict, index)
+                        center_distance, angle_diff, max_overlaps = subsample_labeled_rois(batch_dict, index)
 
             cur_roi = batch_dict['rois'][index][sampled_inds]
             cur_roi_scores = batch_dict['roi_scores'][index][sampled_inds]
@@ -121,7 +131,7 @@ class ProposalTargetLayer(nn.Module):
                             cur_max_overlaps.new_full((sampled_inds.shape[0] - cur_max_overlaps.shape[0],), -1)])
                 
                 # before and after subsampling
-                if 'unlabeled_inds' in batch_dict and index in batch_dict['unlabeled_inds']:
+                if index in batch_dict['unlabeled_inds']:
                     if cind not in classwise_unlab_max_iou_bfs:
                         classwise_unlab_max_iou_bfs[cind] = []
                     classwise_unlab_max_iou_bfs[cind].extend(cur_max_overlaps_bfs)

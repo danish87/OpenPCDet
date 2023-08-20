@@ -57,7 +57,8 @@ class PredQualityMetrics(Metric):
 
     def update(self, rois: [torch.Tensor], roi_scores: [torch.Tensor], roi_weights: [torch.Tensor],
                roi_iou_wrt_pl: [torch.Tensor], roi_target_scores: [torch.Tensor], ground_truths: [torch.Tensor],
-               roi_sim_scores: [torch.Tensor], roi_sim_labels: [torch.Tensor], points: [torch.Tensor]) -> None:
+               roi_sim_scores: [torch.Tensor], roi_sim_labels: [torch.Tensor], points: [torch.Tensor], 
+               roi_iou_pl_dynamic_thresh=None) -> None:
 
         _assert_inputs_are_valid(rois, roi_scores, ground_truths)
 

@@ -12,8 +12,29 @@ from .pv_rcnn import PVRCNN
 from ...utils import common_utils
 from ...utils.stats_utils import metrics_registry
 from ...utils.prototype_utils import feature_bank_registry
+from ...utils.weighting_methods import build_thresholding_method
 from collections import defaultdict
 from visual_utils import open3d_vis_utils as V
+
+class dynamicThreshRegistry(object):
+    def __init__(self, **kwargs):
+        self._tag_metrics = {}
+        self.dataset = kwargs.get('dataset', None)
+        self.model_cfg = kwargs.get('model_cfg', None)
+
+    def get(self, tag=None):
+        if tag is None:
+            tag = 'default'
+        if tag in self._tag_metrics.keys():
+            metric = self._tag_metrics[tag]
+        else:
+            metric = build_thresholding_method(tag=tag, dataset=self.dataset, config=self.model_cfg)
+            self._tag_metrics[tag] = metric
+        return metric
+    
+    def tags(self):
+        return self._tag_metrics.keys()
+    
 
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -34,7 +55,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.sem_thresh = model_cfg.SEM_THRESH
         self.unlabeled_supervise_cls = model_cfg.UNLABELED_SUPERVISE_CLS
         self.unlabeled_supervise_refine = model_cfg.UNLABELED_SUPERVISE_REFINE
-        self.unlabeled_weight = model_cfg.UNLABELED_WEIGHT
+        self.max_unlabeled_weight = model_cfg.UNLABELED_WEIGHT # could also be more than 1.0 
+        self.unlabeled_weight_ascent_list = model_cfg.UNSUPERVISE_ASCENT_LIST
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
 
@@ -43,6 +65,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         for metrics_configs in model_cfg.get("METRICS_BANK_LIST", []):
             metrics_registry.register(tag=metrics_configs["NAME"], dataset=self.dataset, **metrics_configs)
+        self.thresh_registry = dynamicThreshRegistry(dataset=self.dataset, model_cfg=model_cfg)
 
         self._dict_map_ = {
                 'iou_roi_pl': 'batch_iou_roi_pl[batch_index]',
@@ -113,15 +136,17 @@ class PVRCNN_SSL(Detector3DTemplate):
 
     def forward(self, batch_dict):
         if self.training:
-            cur_iteration, cur_epoch = batch_dict['cur_iteration'], batch_dict['cur_epoch']
+            
             labeled_mask = batch_dict['labeled_mask'].view(-1)
             labeled_inds = torch.nonzero(labeled_mask).squeeze(1).long()
             unlabeled_inds = torch.nonzero(1-labeled_mask).squeeze(1).long()
             batch_dict['unlabeled_inds'] = unlabeled_inds
             batch_dict['labeled_inds'] = labeled_inds
-            ori_gt_boxes = batch_dict['gt_boxes'] # required for stats to store lbl and unlab
-            if cur_epoch > self.unlabeled_weight_ascent_list[0]:
-
+            ori_gt_boxes = batch_dict['gt_boxes'] # required for lbl and unlab
+            batch_dict['ori_gt_boxes'] = ori_gt_boxes
+            batch_dict['thresh_registry'] = self.thresh_registry
+            
+            if batch_dict['cur_epoch'] > self.unlabeled_weight_ascent_list[0]:
                 batch_dict_ema = {}
                 keys = list(batch_dict.keys())
                 for k in keys:
@@ -156,7 +181,6 @@ class PVRCNN_SSL(Detector3DTemplate):
                 # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
                 batch_dict = self.apply_augmentation(batch_dict, batch_dict, unlabeled_inds, key='gt_boxes')
 
-                batch_dict['ori_gt_boxes'] = ori_gt_boxes
 
                 for cur_module in self.pv_rcnn.module_list:
                     batch_dict = cur_module(batch_dict)
@@ -206,35 +230,40 @@ class PVRCNN_SSL(Detector3DTemplate):
                         self.pv_rcnn.roi_head.forward_ret_dict['rcnn_cls_score_teacher'] = rcnn_cls_score_teacher
                         # For metrics
                         self.pv_rcnn.roi_head.forward_ret_dict['batch_box_preds_teacher'] = batch_box_preds_teacher
+
+                
+                for tag in feature_bank_registry.tags():
+                    feature_bank_registry.get(tag).compute()
+            
             else:
                 for cur_module in self.pv_rcnn.module_list:
                     batch_dict = cur_module(batch_dict)
 
             disp_dict = {}
-            loss_rpn_cls, loss_rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
+            rpn_cls, rpn_box, tb_dict = self.pv_rcnn.dense_head.get_loss(scalar=False)
             loss_point, tb_dict = self.pv_rcnn.point_head.get_loss(tb_dict, scalar=False)
-            loss_rcnn_cls, loss_rcnn_box, ulb_loss_cls_dist, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
-            unlabeled_weight = self.calc_smooth_unlabeled_weight(cur_epoch)
+            rcnn_cls, rcnn_box, ulb_loss_cls_dist, tb_dict = self.pv_rcnn.roi_head.get_loss(tb_dict, scalar=False)
+            unlabeled_weight = self.calc_smooth_unlabeled_weight(batch_dict['cur_epoch'])
 
             # Use the same reduction method as the baseline model (3diou) by the default
             reduce_loss = getattr(torch, self.model_cfg.REDUCE_LOSS, 'sum')
             
-            loss_rpn_cls = reduce_loss(loss_rpn_cls[labeled_inds, ...])
+            loss_rpn_cls = reduce_loss(rpn_cls[labeled_inds, ...])
             if self.unlabeled_supervise_cls:
-                loss_rpn_cls += reduce_loss(loss_rpn_cls[unlabeled_inds, ...]) * unlabeled_weight
+                loss_rpn_cls += reduce_loss(rpn_cls[unlabeled_inds, ...]) * unlabeled_weight
 
-            loss_rpn_box = reduce_loss(loss_rpn_box[labeled_inds, ...]) + \
-                reduce_loss(loss_rpn_box[unlabeled_inds, ...]) * unlabeled_weight
+            loss_rpn_box = reduce_loss(rpn_box[labeled_inds, ...]) + \
+                reduce_loss(rpn_box[unlabeled_inds, ...]) * unlabeled_weight
             
             loss_point = reduce_loss(loss_point[labeled_inds, ...])
 
-            loss_rcnn_cls = reduce_loss(loss_rcnn_cls[labeled_inds, ...])
+            loss_rcnn_cls = reduce_loss(rcnn_cls[labeled_inds, ...])
             if self.model_cfg['ROI_HEAD'].get('ENABLE_SOFT_TEACHER', False) or self.model_cfg.get('UNLABELED_SUPERVISE_OBJ', False):
-                loss_rcnn_cls += reduce_loss(loss_rcnn_cls[unlabeled_inds, ...]) * unlabeled_weight
+                loss_rcnn_cls += reduce_loss(rcnn_cls[unlabeled_inds, ...]) * unlabeled_weight
 
-            loss_rcnn_box = reduce_loss(loss_rcnn_box[labeled_inds, ...])
+            loss_rcnn_box = reduce_loss(rcnn_box[labeled_inds, ...])
             if self.unlabeled_supervise_refine:
-                loss_rcnn_box +=  reduce_loss(loss_rcnn_box[unlabeled_inds, ...]) * unlabeled_weight
+                loss_rcnn_box +=  reduce_loss(rcnn_box[unlabeled_inds, ...]) * unlabeled_weight
             
 
             loss = loss_rpn_cls + loss_rpn_box + loss_point + loss_rcnn_cls + loss_rcnn_box
@@ -258,8 +287,12 @@ class PVRCNN_SSL(Detector3DTemplate):
             if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
                 self.dump_statistics(batch_dict, unlabeled_inds)
 
-            for tag in feature_bank_registry.tags():
-                feature_bank_registry.get(tag).compute()
+            # update dynamic thresh results
+            for tag in self.thresh_registry.tags():
+                results = self.thresh_registry.get(tag).compute()
+                if results:
+                    tag = tag + "/" if tag else ''
+                    tb_dict_.update({tag + key: val for key, val in results.items()})
 
             for tag in metrics_registry.tags():
                 results = metrics_registry.get(tag).compute()
@@ -288,9 +321,36 @@ class PVRCNN_SSL(Detector3DTemplate):
     def dump_statistics(self, batch_dict, unlabeled_inds):
         # Store different types of scores over all itrs and epochs and dump them in a pickle for offline modeling
         # TODO (shashank) : Can be optimized later to save computational time, currently takes about 0.002sec
+        # iter wise
+        for tag_ in ['classwise_unlab_max_iou_bfs', 'classwise_unlab_max_iou_afs', 'classwise_lab_max_iou_bfs', 'classwise_lab_max_iou_afs']:
+            iter_name_ =  f'{tag_}_iteration'
+            if not (tag_ in self.pv_rcnn.roi_head.forward_ret_dict and self.pv_rcnn.roi_head.forward_ret_dict[tag_]): continue
+            cur_iteration_index = torch.ones_like(self.pv_rcnn.roi_head.forward_ret_dict[tag_][0]) * (batch_dict['cur_iteration'])
+            if 'unlab' in tag_:
+                if not iter_name_ in self.val_unlbd_dict:
+                    self.val_unlbd_dict[iter_name_]=[]
+                self.val_unlbd_dict[iter_name_].extend(cur_iteration_index.tolist())
+            else:
+                if not iter_name_ in self.val_lbd_dict:
+                    self.val_lbd_dict[iter_name_]=[]
+                self.val_lbd_dict[iter_name_].extend(cur_iteration_index.tolist())
+
+            for key, val in self.pv_rcnn.roi_head.forward_ret_dict[tag_].items():
+                name_ = f'{tag_}_{self.dataset.class_names[key]}'
+                if 'unlab' in tag_:
+                    if not name_ in self.val_unlbd_dict:
+                        self.val_unlbd_dict[name_]=[]
+                    self.val_unlbd_dict[name_].extend(val.tolist())
+                else:
+                    if not name_ in self.val_lbd_dict:
+                        self.val_lbd_dict[name_]=[]
+                    self.val_lbd_dict[name_].extend(val.tolist())
+                
+
         batch_roi_labels = self.pv_rcnn.roi_head.forward_ret_dict['roi_labels'].detach().clone()
         batch_rois = self.pv_rcnn.roi_head.forward_ret_dict['rois'].detach().clone()
         batch_ori_gt_boxes = self.pv_rcnn.roi_head.forward_ret_dict['ori_gt_boxes'].detach().clone()
+        batch_iou_roi_pl = self.pv_rcnn.roi_head.forward_ret_dict['gt_iou_of_rois'].detach().clone()
         batch_center_dist = self.pv_rcnn.roi_head.forward_ret_dict['center_dist'].detach().clone()
         batch_angle_diff = self.pv_rcnn.roi_head.forward_ret_dict['angle_diff'].detach().clone()
         batch_raw_roi_score =  self.pv_rcnn.roi_head.forward_ret_dict['roi_scores'].detach().clone()
