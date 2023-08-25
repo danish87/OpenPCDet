@@ -18,7 +18,7 @@ DATA_CONFIG:
               NUM_POINT_FEATURES: 4
               DATABASE_WITH_FAKELIDAR: False
               REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
-              LIMIT_WHOLE_SCENE: False
+              LIMIT_WHOLE_SCENE: True
 
             - NAME: random_world_flip
               ALONG_AXIS_LIST: ['x']
@@ -163,11 +163,11 @@ MODEL:
         ENABLE_RELIABILITY: False
         ENABLE_SOFT_TEACHER: False
         ENABLE_ULB_CLS_DIST_LOSS: False
-        ENABLE_EVAL: True
+        ENABLE_EVAL: False
         METRICS_PRED_TYPES: [roi_pl_gt, pl_gt_metrics_before_filtering]
         ADAPTIVE_THRESH_CONFIG:
             NAME: AdaptiveThresholdGMM
-            ENABLE: True
+            ENABLE: False
             PERCENT: 0.1
             MOMENTUM: 0.9
             PRE_FILTERING_THRESH: 0.1
@@ -221,7 +221,7 @@ MODEL:
             REG_FG_THRESH: 0.55
             UNLABELED_REG_FG_THRESH: [0.55, 0.55, 0.55]
             LABELED_SAMPLER_TYPE: subsample_labeled_rois
-            UNLABELED_SAMPLER_TYPE: subsample_unlabeled_rois_classwise
+            UNLABELED_SAMPLER_TYPE: subsample_labeled_rois
             UNLABELED_SAMPLE_EASY_BG: True
             UNLABELED_SHARP_RCNN_CLS_LABELS: True
             UNLABELED_USE_CALIBRATED_IOUS: True
@@ -280,9 +280,8 @@ MODEL:
     SUPERVISE_MODE: 0
     NO_NMS: False
     EMA_ALPHA: 0.999
-    EMA_UPDATE_INTERVAL: 1 
     REDUCE_LOSS: 'mean'
-    STORE_SCORES_IN_PKL: True
+    STORE_SCORES_IN_PKL: False
 
     FEATURE_BANK_LIST:
         - NAME: gt_aug_lbl_prototypes

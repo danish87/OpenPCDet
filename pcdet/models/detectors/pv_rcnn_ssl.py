@@ -49,8 +49,8 @@ class PVRCNN_SSL(Detector3DTemplate):
             param.detach_()
         self.add_module('pv_rcnn', self.pv_rcnn)
         self.add_module('pv_rcnn_ema', self.pv_rcnn_ema)
-        self.accumulated_itr = 0
-
+        self.enable_ema_update = False
+        self.ema_alpha = 0
         self.thresh = model_cfg.THRESH
         self.sem_thresh = model_cfg.SEM_THRESH
         self.unlabeled_supervise_cls = model_cfg.UNLABELED_SUPERVISE_CLS
@@ -145,6 +145,10 @@ class PVRCNN_SSL(Detector3DTemplate):
             ori_gt_boxes = batch_dict['gt_boxes'] # required for lbl and unlab
             batch_dict['ori_gt_boxes'] = ori_gt_boxes
             batch_dict['thresh_registry'] = self.thresh_registry
+            
+            # enable ema update
+            if self.enable_ema_update == False and batch_dict['cur_epoch'] == self.unlabeled_weight_ascent_list[0]:
+                self.enable_ema_update = True
             
             if batch_dict['cur_epoch'] > self.unlabeled_weight_ascent_list[0]:
                 batch_dict_ema = {}
@@ -283,7 +287,8 @@ class PVRCNN_SSL(Detector3DTemplate):
                     tb_dict_[key + "_unlabeled"] = reduce_loss(tb_dict[key][unlabeled_inds, ...])
                 else:
                     tb_dict_[key] = tb_dict[key]
-
+            tb_dict_['unlabeled_weight'] = unlabeled_weight
+            tb_dict_['ema-alpha'] = self.ema_alpha
             if self.model_cfg.get('STORE_SCORES_IN_PKL', False) :
                 self.dump_statistics(batch_dict, unlabeled_inds)
 
@@ -544,12 +549,15 @@ class PVRCNN_SSL(Detector3DTemplate):
                 batch_dict[key][unlabeled_inds[i]] = pseudo_box
         else:
             ori_boxes = batch_dict['gt_boxes']
+            ori_ins_ids = batch_dict['instance_idx']
             new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
                                     device=ori_boxes.device)
-            for i, inds in enumerate(labeled_inds):
-                diff = max_pseudo_box_num - ori_boxes[inds].shape[0]
-                new_box = torch.cat([ori_boxes[inds], torch.zeros((diff, 8), device=ori_boxes[inds].device)], dim=0)
-                new_boxes[inds] = new_box
+            new_ins_idx = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=-1, device=ori_boxes.device)
+            for i, idx in enumerate(labeled_inds):
+                diff = max_pseudo_box_num - ori_boxes[idx].shape[0]
+                new_box = torch.cat([ori_boxes[idx], torch.zeros((diff, 8), device=ori_boxes[idx].device)], dim=0)
+                new_boxes[idx] = new_box
+                new_ins_idx[idx] = torch.cat([ori_ins_ids[idx], -torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
             for i, pseudo_box in enumerate(pseudo_boxes):
 
                 diff = max_pseudo_box_num - pseudo_box.shape[0]
@@ -557,6 +565,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                     pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
                 new_boxes[unlabeled_inds[i]] = pseudo_box
             batch_dict[key] = new_boxes
+            batch_dict['instance_idx'] = new_ins_idx
 
     def apply_augmentation(self, batch_dict, batch_dict_org, unlabeled_inds, key='rois'):
         batch_dict[key][unlabeled_inds] = augmentor_utils.random_flip_along_x_bbox(
@@ -600,18 +609,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         return loss, tb_dict, disp_dict
 
     def update_global_step(self):
-        self.global_step += 1
-        self.accumulated_itr += 1
-        if self.accumulated_itr % self.model_cfg.EMA_UPDATE_INTERVAL != 0:
+        if not self.enable_ema_update:
             return
-        alpha = self.model_cfg.EMA_ALPHA
-        # Use the true average until the exponential average is more correct
-        alpha = min(self.model_cfg.EMA_ALPHA, torch.sigmoid(10 * (self.global_step/1000 - 0.5)))
-        # TODO: Needs revision: alpha will be 0.5 at 500th global-step(iteration) and 1.0 at 1000
+        self.global_step += 1
+        # Default Use the true average until the exponential average is more correct
+        self.ema_alpha = min(1 - 1 / (self.global_step.item() + 1), self.model_cfg.EMA_ALPHA)
+        # smooth update
+        # alpha = min(self.model_cfg.EMA_ALPHA, torch.sigmoid(10 * (self.global_step/1000 - 0.5)))
+        # alpha will be 0.5 at 500th global-step(iteration) and 1.0 at 1000
         for ema_param, param in zip(self.pv_rcnn_ema.parameters(), self.pv_rcnn.parameters()):
             # TODO(farzad) check this
-            ema_param.data.mul_(alpha).add_((1 - alpha) * param.data)
-        self.accumulated_itr = 0
+            ema_param.data.mul_(self.ema_alpha).add_((1 - self.ema_alpha) * param.data)
 
     def load_params_from_file(self, filename, logger, to_cpu=False):
         if not os.path.isfile(filename):

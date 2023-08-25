@@ -227,8 +227,7 @@ class RoIHeadTemplate(nn.Module):
         roi_boxes3d = forward_ret_dict['rois']
         rcnn_batch_size = gt_boxes3d_ct.view(-1, code_size).shape[0]
         batch_size = forward_ret_dict['reg_valid_mask'].shape[0]
-        print(reg_valid_mask.shape)
-        print((reg_valid_mask > 0).sum())
+
         fg_mask = (reg_valid_mask > 0)
         fg_sum = fg_mask.long().sum().item()
         # if scalar:

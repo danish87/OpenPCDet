@@ -2,8 +2,6 @@ import argparse
 import datetime
 import glob
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='1'
-os.environ['TORCH_USE_CUDA_DSA'] = '1'
 from pathlib import Path
 from test import repeat_eval_ckpt
 
