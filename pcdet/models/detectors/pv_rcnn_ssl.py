@@ -15,7 +15,7 @@ from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 from pcdet.utils.thresh_algs import thresh_registry
 from visual_utils import open3d_vis_utils as V
-
+import matplotlib.pyplot as plt
 
 class PVRCNN_SSL(Detector3DTemplate):
     def __init__(self, model_cfg, num_class, dataset):
@@ -161,8 +161,37 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
             thresh_masks = torch.ones_like(batch_dict_ema['roi_scores'], dtype=torch.bool)
-            ulb_thresh_masks = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='FreeMatch')
-            thresh_masks[ulb_inds] = ulb_thresh_masks
+            ulb_thresh_masks_adamatch, _ = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='AdaMatch')
+            ulb_thresh_masks_softmatch, lambda_p = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='SoftMatch')
+            ulb_thresh_masks_freematch, _ = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='FreeMatch')
+            max_scores, labels = torch.max(batch_dict_ema['roi_scores_multiclass'][ulb_inds], dim=-1)
+            info = f"Iter: {batch_dict['cur_iteration']}"
+            fig, axs = plt.subplots(2, 2, figsize=(8, 8), sharex='col', sharey='row', layout="compressed")
+            axs=axs.flatten()
+            # Plot the histograms
+            axs[0].hist(max_scores.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='r', label='sem-org')
+            axs[1].hist(max_scores[ulb_thresh_masks_adamatch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='g', label='sem-adamatch')
+            axs[2].hist(max_scores[ulb_thresh_masks_softmatch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='sem-softmatch')
+            axs[3].hist(max_scores[ulb_thresh_masks_freematch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='c', label='sem-freematch')
+
+            # Add titles, labels, and legends
+            for ax in axs:
+                ax.set_xlabel('score', fontsize='x-small')
+                ax.set_ylabel('count', fontsize='x-small')
+                ax.set_ylim(0, 100)
+                ax.set_xlim(0, 1)
+
+            axs[0].set_title('sem-org', fontsize='small')
+            axs[1].set_title('sem-adamatch', fontsize='small')
+            axs[2].set_title('sem-softmatch', fontsize='small')
+            axs[3].set_title('sem-freematch', fontsize='small')
+
+            plt.suptitle(info, fontsize='small')
+            plt.show()
+            rectify_sem_scores_plots = fig.get_figure()
+            plt.close()
+
+            thresh_masks[ulb_inds] = ulb_thresh_masks_softmatch
             batch_dict_ema['pre_nms_thresh_masks'] = thresh_masks
 
         pseudo_labels_dict, _ = self.pv_rcnn_ema.post_processing(batch_dict_ema, no_recall_dict=True)
