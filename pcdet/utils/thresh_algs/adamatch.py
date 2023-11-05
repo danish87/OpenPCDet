@@ -255,44 +255,49 @@ class AdaMatch(Metric):
         prob = getattr(self, p_name)
         prob[tag] = probs if prob[tag] is None else self.momentum * prob[tag] + (1 - self.momentum) * probs
 
-    def get_mask(self, scores, thresh_alg='AdaMatch'):
+    def get_mask(self, scores, thresh_alg='AdaMatch', DA=False):
         if thresh_alg == 'AdaMatch':
-            rect_scores = self.rectify_sem_scores(scores, tag=thresh_alg)
-            max_rect_scores, labels = torch.max(rect_scores, dim=-1)
+            if DA:
+                scores = self.rectify_sem_scores(scores, tag=thresh_alg)
+            max_scores, labels = torch.max(scores, dim=-1)
             fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_rect_scores.shape[0], max_rect_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
 
-            fg_mask = max_rect_scores > fg_thresh
-            #thresh_mask = max_rect_scores > self._get_threshold(tag='sem_scores_pre_gt_wa', thresh_alg=thresh_alg)
-            thresh_mask = max_rect_scores > self._get_threshold(tag='sem_scores_wa', thresh_alg=thresh_alg)
-            return thresh_mask & fg_mask, None
+            fg_mask = max_scores > fg_thresh
+            thresh_mask = max_scores > self._get_threshold(tag='sem_scores_wa', thresh_alg=thresh_alg)
+            return thresh_mask, fg_mask, None
 
         elif thresh_alg == 'FreeMatch':
             max_scores, labels = torch.max(scores, dim=-1)
+            fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+            fg_mask = max_scores > fg_thresh
             thresh = self._get_threshold(tag='sem_scores_wa', thresh_alg=thresh_alg)
             multi_thresh = torch.zeros_like(scores)
             multi_thresh[:, :] = thresh
             multi_thresh = multi_thresh.gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            return max_scores > multi_thresh, None
+            return (max_scores > multi_thresh), fg_mask, None
         elif thresh_alg == 'SoftMatch':
-            #max_scores, labels = torch.max(scores, dim=-1) # for ploting use labels from here
-            rect_scores = self.rectify_sem_scores(scores, tag=thresh_alg)
-            max_rect_scores, labels = torch.max(rect_scores, dim=-1)
-            
+            # max_scores, labels = torch.max(scores, dim=-1) # for ploting use labels from here
+            # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+            # max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+            # fg_mask_raw = max_scores > fg_thresh
+            if DA:
+                scores = self.rectify_sem_scores(scores, tag=thresh_alg)
+            max_scores, labels = torch.max(scores, dim=-1)
             fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_rect_scores.shape[0], max_rect_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-
-            fg_mask = max_rect_scores > fg_thresh
+            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+            fg_mask = max_scores > fg_thresh
             mu = _ulb(self.mean_p_max_model['sem_scores_wa'])
             var = _ulb(self.var_p_max_model['sem_scores_wa'])
             n_sigma = 2
-            lambda_p = torch.exp(-((torch.clamp(max_rect_scores - mu, max=0.0) ** 2) / (2 * var / (n_sigma ** 2))))
+            lambda_p = torch.exp(-((torch.clamp(max_scores - mu, max=0.0) ** 2) / (2 * var / (n_sigma ** 2))))
 
-            # fig, axs = plt.subplots(2, 2, figsize=(8, 8), sharex='col', sharey='row', layout="compressed")
+            # fig, axs = plt.subplots(2, 2, figsize=(8, 8), layout="compressed")
             # axs = axs.flatten()
             # # Plot the histograms
-            # axs[0].hist(max_scores[fg_mask].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='r', label='ulb-fg')
-            # axs[1].hist(max_rect_scores[fg_mask].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='UA-ulb-fg')
+            # axs[0].hist(max_scores[fg_mask_raw].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='r', label='ulb-fg')
+            # axs[1].hist(max_rect_scores[fg_mask_rect].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='UA-ulb-fg')
             # axs[2].hist(max_rect_scores.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='max-UA')
             # axs[3].hist(lambda_p.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='c', label='lambda-p')
             # axs[3].axvline(mu.cpu().numpy())
@@ -301,8 +306,8 @@ class AdaMatch(Metric):
             # for ax in axs:
             #     ax.set_xlabel('score', fontsize='x-small')
             #     ax.set_ylabel('count', fontsize='x-small')
-            #     ax.set_ylim(0, 100)
-            #     ax.set_xlim(0, 1)
+            #     # ax.set_ylim(0, 100)
+            #     # ax.set_xlim(0, 1)
 
             # axs[0].set_title('fg-ulb', fontsize='small')
             # axs[1].set_title('UA(fg-ulb)', fontsize='small')
@@ -314,7 +319,7 @@ class AdaMatch(Metric):
             # rectify_sem_scores_plots = fig.get_figure()
             # plt.close()
 
-            return (max_rect_scores > mu) & fg_mask, lambda_p
+            return (max_scores > mu), fg_mask, lambda_p
 
     def _get_threshold(self, sem_scores_wa_lbl=None, tag='sem_scores_wa', thresh_alg='AdaMatch'):
         if thresh_alg == 'AdaMatch':

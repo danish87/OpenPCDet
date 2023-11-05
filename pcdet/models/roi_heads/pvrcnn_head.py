@@ -163,8 +163,10 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['roi_scores_multiclass'] = targets_dict['roi_scores_multiclass']
             batch_dict['gt_iou_of_rois'] = targets_dict['gt_iou_of_rois']
             # Temporarily add infos to targets_dict for metrics
-            targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
-            targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
+            if 'unlabeled_inds' in batch_dict:
+                targets_dict['unlabeled_inds'] = batch_dict['unlabeled_inds']
+            if 'ori_unlabeled_boxes' in batch_dict:
+                targets_dict['ori_unlabeled_boxes'] = batch_dict['ori_unlabeled_boxes']
             targets_dict['points'] = batch_dict['points']
 
         pooled_features = self.pool_features(batch_dict)

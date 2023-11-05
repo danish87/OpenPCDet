@@ -255,6 +255,7 @@ class Detector3DTemplate(nn.Module):
                     sem_scores = torch.sigmoid(batch_dict['roi_scores'][index])
                     sem_scores_multiclass = batch_dict['roi_scores_multiclass'][index]
                     thresh_masks = batch_dict['pre_nms_thresh_masks'][index] if 'pre_nms_thresh_masks' in batch_dict else None
+                    lambda_p = batch_dict['pre_nms_lambda_p'][index] if 'pre_nms_lambda_p' in batch_dict else None
                 else:
                     label_preds = label_preds + 1
                 # Should be True to preserve the order of roi's passed from the student
@@ -276,6 +277,7 @@ class Detector3DTemplate(nn.Module):
                 final_sem_scores = sem_scores[selected]
                 final_sem_scores_multiclass = sem_scores_multiclass[selected]
                 final_thresh_masks = thresh_masks[selected] if 'pre_nms_thresh_masks' in batch_dict else None
+                final_lambda_p = lambda_p[selected] if 'pre_nms_lambda_p' in batch_dict else None
                 final_labels = label_preds[selected]
                 final_boxes = box_preds[selected]
 
@@ -292,6 +294,7 @@ class Detector3DTemplate(nn.Module):
                 'pred_sem_scores': final_sem_scores,
                 'pred_sem_scores_multiclass': final_sem_scores_multiclass,
                 'pred_thresh_masks': final_thresh_masks,
+                'pred_lambda_p': final_lambda_p,
                 'pred_labels': final_labels,
             }
 

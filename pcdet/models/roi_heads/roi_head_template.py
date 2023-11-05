@@ -314,7 +314,7 @@ class RoIHeadTemplate(nn.Module):
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
                 if 'rcnn_cls_weights' in forward_ret_dict:
-                    rcnn_cls_weights = forward_ret_dict['rcnn_cls_weights']
+                    rcnn_cls_weights = forward_ret_dict['sem_scores_lambda_p']*forward_ret_dict['rcnn_cls_weights']
                     rcnn_loss_cls_norm = (cls_valid_mask * rcnn_cls_weights).sum(-1)
                     rcnn_loss_cls = (batch_loss_cls * cls_valid_mask * rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
                 else:

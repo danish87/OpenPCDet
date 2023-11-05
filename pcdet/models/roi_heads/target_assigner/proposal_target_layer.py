@@ -56,7 +56,7 @@ class ProposalTargetLayer(nn.Module):
         batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
         batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
-
+        batch_sem_scores_lambda_p = rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         for index in range(batch_size):
             cur_gt_boxes = batch_dict['gt_boxes'][index]
             k = cur_gt_boxes.__len__() - 1
@@ -66,14 +66,14 @@ class ProposalTargetLayer(nn.Module):
             cur_gt_boxes = cur_gt_boxes.new_zeros((1, cur_gt_boxes.shape[1])) if len(
                 cur_gt_boxes) == 0 else cur_gt_boxes
 
-            if index in batch_dict['unlabeled_inds']:
+            if 'unlabeled_inds' in batch_dict and index in batch_dict['unlabeled_inds']:
                 subsample_unlabeled_rois = getattr(self, self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE, None)
                 if self.roi_sampler_cfg.UNLABELED_SAMPLER_TYPE is None:
                     sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = self.subsample_labeled_rois(batch_dict, index)
                 else:
                     sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = subsample_unlabeled_rois(batch_dict, index)
             else:
-                sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask = self.subsample_labeled_rois(batch_dict, index)
+                sampled_inds, cur_reg_valid_mask, cur_cls_labels, roi_ious, gt_assignment, cur_interval_mask= self.subsample_labeled_rois(batch_dict, index)
             batch_rois[index] = batch_dict['rois'][index][sampled_inds]
             batch_gt_of_rois[index] = cur_gt_boxes[gt_assignment[sampled_inds]]
             batch_roi_ious[index] = roi_ious
@@ -82,12 +82,13 @@ class ProposalTargetLayer(nn.Module):
             batch_roi_labels[index] = batch_dict['roi_labels'][index][sampled_inds]
             batch_reg_valid_mask[index] = cur_reg_valid_mask
             batch_cls_labels[index] = cur_cls_labels
+            batch_sem_scores_lambda_p[index] = batch_dict['sem_scores_lambda_p'][index][gt_assignment[sampled_inds]]
             interval_mask[index] = cur_interval_mask
 
         return {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
                 'roi_scores': batch_roi_scores, 'roi_scores_multiclass': batch_roi_scores_multiclass,
                 'roi_labels': batch_roi_labels, 'reg_valid_mask': batch_reg_valid_mask,
-                'rcnn_cls_labels': batch_cls_labels, 'interval_mask': interval_mask}
+                'rcnn_cls_labels': batch_cls_labels, 'interval_mask': interval_mask, 'sem_scores_lambda_p': batch_sem_scores_lambda_p}
 
     def subsample_unlabeled_rois_default(self, batch_dict, index):
         cur_roi = batch_dict['rois'][index]
@@ -226,7 +227,7 @@ class ProposalTargetLayer(nn.Module):
         # classification label
         iou_bg_thresh = self.roi_sampler_cfg.CLS_BG_THRESH
         # NOTE (shashank): Use classwise local thresholds used in unlabeled ROIs for labeled ROIs  
-        if self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB :
+        if 'USE_ULB_CLS_FG_THRESH_FOR_LB' in self.roi_sampler_cfg and self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB :
             iou_fg_thresh = self.roi_sampler_cfg.UNLABELED_CLS_FG_THRESH
             iou_fg_thresh = roi_ious.new_tensor(iou_fg_thresh).unsqueeze(0).repeat(len(roi_ious), 1)
             iou_fg_thresh = torch.gather(iou_fg_thresh, dim=-1, index=(cur_roi_labels[sampled_inds]-1).unsqueeze(-1)).squeeze(-1)
@@ -237,7 +238,8 @@ class ProposalTargetLayer(nn.Module):
         bg_mask = roi_ious < iou_bg_thresh
         interval_mask = (fg_mask == 0) & (bg_mask == 0)
         cls_labels = (fg_mask > 0).float()
-        iou_fg_thresh = iou_fg_thresh[interval_mask] if self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB else iou_fg_thresh
+        if 'USE_ULB_CLS_FG_THRESH_FOR_LB' in self.roi_sampler_cfg and self.roi_sampler_cfg.USE_ULB_CLS_FG_THRESH_FOR_LB :
+            iou_fg_thresh = iou_fg_thresh[interval_mask]
         cls_labels[interval_mask] = \
             (roi_ious[interval_mask] - iou_bg_thresh) / (iou_fg_thresh - iou_bg_thresh)
 
