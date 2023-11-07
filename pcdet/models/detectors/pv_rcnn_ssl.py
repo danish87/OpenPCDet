@@ -161,54 +161,12 @@ class PVRCNN_SSL(Detector3DTemplate):
         thresh_masks = torch.ones_like(batch_dict_ema['roi_scores'], dtype=torch.bool)
         lambda_p = torch.ones_like(batch_dict_ema['roi_scores'])
         if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
-            ulb_thresh_masks_adamatch, _, _ = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='AdaMatch')
-            ulb_thresh_masks_softmatch, _, ulb_lambda_p_softmatch = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='SoftMatch')
-            ulb_thresh_masks_freematch, _, _ = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds], thresh_alg='FreeMatch')
-            max_scores, labels = torch.max(batch_dict_ema['roi_scores_multiclass'][ulb_inds], dim=-1)
-            info = f"Iter: {batch_dict['cur_iteration']}"
-            fig, axs = plt.subplots(2, 2, figsize=(8, 8), layout="compressed")
-            axs=axs.flatten()
-            # Plot the histograms
-            axs[0].hist(max_scores.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='r', label='sem-org')
-            axs[1].hist(max_scores[ulb_thresh_masks_adamatch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='g', label='sem-adamatch')
-            axs[2].hist(max_scores[ulb_thresh_masks_softmatch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='sem-softmatch')
-            axs[3].hist(max_scores[ulb_thresh_masks_freematch].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='c', label='sem-freematch')
-
-            # Add titles, labels, and legends
-            for ax in axs:
-                ax.set_xlabel('score', fontsize='x-small')
-                ax.set_ylabel('count', fontsize='x-small')
-                # ax.set_ylim(0, 100)
-                # ax.set_xlim(0, 1)
-
-            axs[0].set_title('sem-org', fontsize='small')
-            axs[1].set_title('sem-adamatch', fontsize='small')
-            axs[2].set_title('sem-softmatch', fontsize='small')
-            axs[3].set_title('sem-freematch', fontsize='small')
-
-            plt.suptitle(info, fontsize='small')
-            plt.show()
-            rectify_sem_scores_plots = fig.get_figure()
-            plt.close()
-
-            fig, ax = plt.subplots()
-            scatter = ax.scatter(max_scores.view(-1).cpu().numpy(), ulb_lambda_p_softmatch.view(-1).cpu().numpy(), c=labels.view(-1).cpu().numpy(), s=5)
-            # Add labels and a title
-            plt.xlabel('Scores')
-            plt.ylabel('lambda-p')
-            plt.title('SoftMatch scores vs lambda-p')
-
-            unique_labels = torch.unique(labels)
-            legend_labels = unique_labels.view(-1).cpu().numpy()
-            handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=scatter.cmap(scatter.norm(label)), markersize=10, label=label) for label in legend_labels]
-            ax.legend(handles=handles, title='Classes')
-
-            # Show the plot
-            plt.show()
-            rectify_sem_scores_plots = fig.get_figure()
-            plt.close()
-            thresh_masks[ulb_inds] = ulb_thresh_masks_softmatch
-            lambda_p[ulb_inds] = ulb_lambda_p_softmatch
+            ulb_thresh_masks, fg_mask, ulb_lambda_p = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds])
+            if self.thresh_alg.thresh_method == 'SoftMatch':
+                lambda_p[ulb_inds] = ulb_lambda_p
+            else:
+                # TODO disabled fg_mask, need to check if that should be thresh_masks[ulb_inds] = ulb_thresh_masks & fg_mask
+                thresh_masks[ulb_inds] = ulb_thresh_masks
 
         batch_dict_ema['pre_nms_thresh_masks'] = thresh_masks
         batch_dict_ema['pre_nms_lambda_p'] = lambda_p
@@ -219,7 +177,8 @@ class PVRCNN_SSL(Detector3DTemplate):
         ulb_pred_labels = torch.cat([pseudo_labels_dict[ind]['pred_labels'] for ind in ulb_inds]).int().detach()
         pl_cls_count_pre_filter = torch.bincount(ulb_pred_labels, minlength=4)[1:]
 
-        pseudo_boxes, pseudo_scores, pseudo_sem_scores, pseudo_sem_scores_multi, pseudo_sem_scores_lambda_p = self._filter_pls(pseudo_labels_dict, ulb_inds)
+        (pseudo_boxes, pseudo_scores, pseudo_sem_scores, \
+         pseudo_sem_scores_multi, pseudo_sem_scores_lambda_p) = self._filter_pls(pseudo_labels_dict, ulb_inds)
         self._fill_with_pseudo_labels(batch_dict, pseudo_boxes, pseudo_sem_scores_lambda_p, ulb_inds, lbl_inds)
 
         pl_cls_count_post_filter = torch.bincount(batch_dict['gt_boxes'][ulb_inds][...,-1].view(-1).int().detach(), minlength=4)[1:]
@@ -540,7 +499,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             reliable_mask = scores > conf_thresh.squeeze()
             # disable sem thresholding while using softmatch weighting
-            if not softmatch:
+            if not self.thresh_alg.thresh_method == 'SoftMatch':
                 if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
                     reliable_mask = torch.logical_and(reliable_mask, sem_thresh_masks)
                 else:

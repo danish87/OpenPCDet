@@ -19,7 +19,7 @@ def _ulb(tensor, mask=None):
     return _ulb(tensor)[_ulb(mask)] if mask is not None else tensor.chunk(2)[1].squeeze(0)
 
 
-class AdaMatch(Metric):
+class AdaptiveThresholding(Metric):
     """
         Adamatch based relative Thresholding
         mean conf. of the top-1 prediction on the weakly aug source data multiplied by a user provided threshold
@@ -43,6 +43,8 @@ class AdaMatch(Metric):
 
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
         self.prior_sem_fg_thresh = configs.get('SEM_FG_THRESH', 0.33)
+        self.thresh_method = configs.get('THRESH_METHOD', None)
+        self.target_to_align = configs.get('TARGET_TO_ALIGN', None)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)
         self.fixed_thresh = configs.get('FIXED_THRESH', 0.9)
         self.momentum = configs.get('MOMENTUM', 0.9)
@@ -62,8 +64,7 @@ class AdaMatch(Metric):
         self.mean_p_max_model = {s_name: None for s_name in self.states_name}
         self.var_p_max_model = {s_name: None for s_name in self.states_name}
         self.labels_hist = {s_name: None for s_name in self.states_name}
-        self.ratio = {'AdaMatch': None, 'SoftMatch': None}
-
+        self.ratio = {target_tag: None for target_tag in ['lab', 'uniform', 'gt']}
         # Two fixed targets dists
         self.mean_p_model['uniform'] = (torch.ones(len(self.class_names)) / len(self.class_names)).cuda()
         self.mean_p_model['gt'] = torch.tensor([0.85, 0.1, 0.05]).cuda()
@@ -167,14 +168,15 @@ class AdaMatch(Metric):
                 fig = self.draw_dist_plots(max_scores, labels, fg_mask, sname)
                 results[f'dist_plots_{sname}'] = fig
                 plt.close()
-
-        ratio =  _lbl(self.mean_p_model['sem_scores_wa']) / (_ulb(self.mean_p_model['sem_scores_wa']) + 1e-6)
-        self._update_ema('ratio', ratio, 'AdaMatch')
-        results['ratio/lab_by_ulb_wa'] = self._arr2dict(self.ratio['AdaMatch'])
-        ratio =  self.mean_p_model['uniform'] / (_ulb(self.mean_p_model['sem_scores_wa']) + 1e-6)
-        self._update_ema('ratio', ratio, 'SoftMatch')
-        results['ratio/uniform_by_ulb_wa'] = self._arr2dict(self.ratio['SoftMatch'])
-
+        
+        source_dist= _ulb(self.mean_p_model['sem_scores_wa']) + 1e-6
+        for target_tag in ['lab', 'uniform', 'gt']:
+            if 'lab' in target_tag:
+                target_dist = _lbl(self.mean_p_model['sem_scores_wa']) # lab_pre_gt for adamatch
+            else:
+                target_dist = self.mean_p_model[target_tag]
+            self._update_ema('ratio', target_dist/source_dist, target_tag)
+            results[f'ratio/target_as_{target_tag}'] = self._arr2dict(self.ratio[target_tag])
         self.reset()
         return results
 
@@ -198,9 +200,11 @@ class AdaMatch(Metric):
         results[f'mean_p_model_ulb/{sname}'] = self._arr2dict(_ulb(self.mean_p_model[sname]))
         results[f'var_p_model_lbl/{sname}'] = self._arr2dict(_lbl(self.var_p_model[sname]))
         results[f'var_p_model_ulb/{sname}'] = self._arr2dict(_ulb(self.var_p_model[sname]))
-        results['threshold/AdaMatch'] = self._get_threshold(thresh_alg='AdaMatch')
-        results['threshold/SoftMatch'] = self._get_threshold(thresh_alg='SoftMatch')
-        results['threshold/FreeMatch'] = self._arr2dict(self._get_threshold(thresh_alg='FreeMatch'))
+        for thresh_alg in ['AdaMatch', 'FreeMatch', 'SoftMatch']:
+            results[f'threshold/{thresh_alg}'] = self._get_threshold(thresh_alg=thresh_alg)
+            if 'FreeMatch' in thresh_alg:
+                results[f'threshold/{thresh_alg}'] = self._arr2dict(results[f'threshold/{thresh_alg}'])
+                
 
     def draw_dist_plots(self, max_scores, labels, fg_mask, tag, meta_info=''):
 
@@ -233,7 +237,8 @@ class AdaMatch(Metric):
 
         return fig.get_figure()
 
-    def rectify_sem_scores(self, sem_scores_ulb, tag='AdaMatch'):
+    def rectify_sem_scores(self, sem_scores_ulb, target_tag='uniform'):
+        assert target_tag in ['lab', 'uniform', 'gt'], f'{target_tag} not in list [lab, uniform, gt]'
 
         if self.iteration_count == 0:
             print("Skipping rectification as iteration count is 0")
@@ -245,7 +250,7 @@ class AdaMatch(Metric):
 
         fg_mask = max_scores > fg_thresh
 
-        rect_scores = sem_scores_ulb * self.ratio[tag]
+        rect_scores = sem_scores_ulb * self.ratio[target_tag]
         rect_scores /= rect_scores.sum(dim=-1, keepdims=True)
         sem_scores_ulb[fg_mask] = rect_scores[fg_mask]  # Only rectify FG rois
 
@@ -255,73 +260,39 @@ class AdaMatch(Metric):
         prob = getattr(self, p_name)
         prob[tag] = probs if prob[tag] is None else self.momentum * prob[tag] + (1 - self.momentum) * probs
 
-    def get_mask(self, scores, thresh_alg='AdaMatch', DA=False):
-        if thresh_alg == 'AdaMatch':
-            if DA:
-                scores = self.rectify_sem_scores(scores, tag=thresh_alg)
-            max_scores, labels = torch.max(scores, dim=-1)
-            fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+    def get_mask(self, scores):
+        assert self.thresh_method in ['AdaMatch', 'FreeMatch', 'SoftMatch'], f'{self.thresh_method} not in list [AdaMatch, FreeMatch, SoftMatch]'
+        
+        if self.target_to_align is not None:
+            scores = self.rectify_sem_scores(scores, target_tag=self.target_to_align)
+        max_scores, labels = torch.max(scores, dim=-1)
+        fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+        max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+        fg_mask = max_scores > fg_thresh
+        lambda_p_weights = None
+        
+        if self.thresh_method == 'AdaMatch':
+            thresh_mask = max_scores > self._get_threshold(tag='sem_scores_wa', thresh_alg=self.thresh_method)
 
-            fg_mask = max_scores > fg_thresh
-            thresh_mask = max_scores > self._get_threshold(tag='sem_scores_wa', thresh_alg=thresh_alg)
-            return thresh_mask, fg_mask, None
-
-        elif thresh_alg == 'FreeMatch':
-            max_scores, labels = torch.max(scores, dim=-1)
-            fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            fg_mask = max_scores > fg_thresh
-            thresh = self._get_threshold(tag='sem_scores_wa', thresh_alg=thresh_alg)
+        elif self.thresh_method == 'FreeMatch':
+            thresh = self._get_threshold(tag='sem_scores_wa', thresh_alg=self.thresh_method)
             multi_thresh = torch.zeros_like(scores)
             multi_thresh[:, :] = thresh
             multi_thresh = multi_thresh.gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            return (max_scores > multi_thresh), fg_mask, None
-        elif thresh_alg == 'SoftMatch':
-            # max_scores, labels = torch.max(scores, dim=-1) # for ploting use labels from here
-            # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            # max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            # fg_mask_raw = max_scores > fg_thresh
-            if DA:
-                scores = self.rectify_sem_scores(scores, tag=thresh_alg)
-            max_scores, labels = torch.max(scores, dim=-1)
-            fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            fg_mask = max_scores > fg_thresh
+            thresh_mask = max_scores > multi_thresh
+        
+        elif self.thresh_method == 'SoftMatch':
             mu = _ulb(self.mean_p_max_model['sem_scores_wa'])
             var = _ulb(self.var_p_max_model['sem_scores_wa'])
+            thresh_mask = max_scores > mu
             n_sigma = 2
-            lambda_p = torch.exp(-((torch.clamp(max_scores - mu, max=0.0) ** 2) / (2 * var / (n_sigma ** 2))))
-
-            # fig, axs = plt.subplots(2, 2, figsize=(8, 8), layout="compressed")
-            # axs = axs.flatten()
-            # # Plot the histograms
-            # axs[0].hist(max_scores[fg_mask_raw].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='r', label='ulb-fg')
-            # axs[1].hist(max_rect_scores[fg_mask_rect].view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='UA-ulb-fg')
-            # axs[2].hist(max_rect_scores.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='b', label='max-UA')
-            # axs[3].hist(lambda_p.view(-1).cpu().numpy(), bins=20, alpha=0.8, edgecolor='black', color='c', label='lambda-p')
-            # axs[3].axvline(mu.cpu().numpy())
-            
-            # # Add titles, labels, and legends
-            # for ax in axs:
-            #     ax.set_xlabel('score', fontsize='x-small')
-            #     ax.set_ylabel('count', fontsize='x-small')
-            #     # ax.set_ylim(0, 100)
-            #     # ax.set_xlim(0, 1)
-
-            # axs[0].set_title('fg-ulb', fontsize='small')
-            # axs[1].set_title('UA(fg-ulb)', fontsize='small')
-            # axs[2].set_title('max UA(p)', fontsize='small')
-            # axs[3].set_title('labmda-p', fontsize='small')
-
-            # plt.suptitle('softmatch', fontsize='small')
-            # plt.show()
-            # rectify_sem_scores_plots = fig.get_figure()
-            # plt.close()
-
-            return (max_scores > mu), fg_mask, lambda_p
+            scaled_var = (2 * var / (n_sigma ** 2))
+            lambda_p_weights = torch.exp(-((torch.clamp(max_scores - mu, max=0.0) ** 2) / scaled_var))
+        
+        return thresh_mask, fg_mask, lambda_p_weights
 
     def _get_threshold(self, sem_scores_wa_lbl=None, tag='sem_scores_wa', thresh_alg='AdaMatch'):
+        
         if thresh_alg == 'AdaMatch':
             if sem_scores_wa_lbl is None:
                 return _lbl(self.mean_p_max_model[tag]) * self.fixed_thresh

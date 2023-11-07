@@ -1,13 +1,6 @@
-from .freematch import FreeMatchThreshold
-from .adamatch import AdaMatch
-from .consistant_teacher import AdaptiveThresholdGMM
-from .softmatch import SoftMatchThreshold
-
+from .adaptive_thresholding import AdaptiveThresholding
 __all__ = {
-    'FreeMatchThreshold': FreeMatchThreshold,
-    'AdaMatch': AdaMatch,
-    'AdaptiveThresholdGMM': AdaptiveThresholdGMM,
-    # 'SoftMatchThreshold': SoftMatchThreshold # not finalised yet
+    'AdaptiveThresholding': AdaptiveThresholding
     }
 
 class ThresholdingAlgRegistry(object):
