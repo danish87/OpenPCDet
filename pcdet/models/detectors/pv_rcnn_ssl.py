@@ -40,7 +40,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.no_nms = model_cfg.NO_NMS
         self.supervise_mode = model_cfg.SUPERVISE_MODE
         self.thresh_config = self.model_cfg.ADAPTIVE_THRESH_CONFIG
-
+        self.adapt_thresholding = False
         self.thresh_alg = None
         for key, confs in self.thresh_config.items():
             thresh_registry.register(key, **confs)
@@ -258,7 +258,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 feature_bank_registry.get(tag).compute()
 
         # update dynamic thresh alg
-        if results := self.thresh_alg.compute():
+        if self.adapt_thresholding and (results := self.thresh_alg.compute()):
             tb_dict_.update(results)
 
         for tag in metrics_registry.tags():
@@ -499,7 +499,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             reliable_mask = scores > conf_thresh.squeeze()
             # disable sem thresholding while using softmatch weighting
-            if not self.thresh_alg.thresh_method == 'SoftMatch':
+            if self.adapt_thresholding and self.thresh_alg.thresh_method in ['AdaMatch', 'FreeMatch']:
                 if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
                     reliable_mask = torch.logical_and(reliable_mask, sem_thresh_masks)
                 else:
@@ -507,7 +507,11 @@ class PVRCNN_SSL(Detector3DTemplate):
                         0).repeat(len(labels), 1).gather(dim=1, index=(labels - 1).unsqueeze(-1))
                     sem_score_mask = sem_scores > sem_conf_thresh.squeeze()
                     reliable_mask = torch.logical_and(reliable_mask, sem_score_mask)
-
+            elif not self.adapt_thresholding:
+                sem_conf_thresh = torch.tensor(self.sem_thresh, device=labels.device).unsqueeze(
+                    0).repeat(len(labels), 1).gather(dim=1, index=(labels - 1).unsqueeze(-1))
+                sem_score_mask = sem_scores > sem_conf_thresh.squeeze()
+                reliable_mask = torch.logical_and(reliable_mask, sem_score_mask)
             boxs = boxs[reliable_mask]
             labels = labels[reliable_mask]
             scores = scores[reliable_mask]

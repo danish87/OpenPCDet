@@ -248,9 +248,14 @@ class RoIHeadTemplate(nn.Module):
                 rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) * fg_mask.unsqueeze(dim=-1).float()).sum() \
                                 / max(fg_sum, 1)
             else:
-                fg_sum_ = fg_mask.reshape(batch_size, -1).long().sum(-1)
-                rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) *
-                                 fg_mask.unsqueeze(dim=-1).float()).reshape(batch_size, -1).sum(-1) / torch.clamp(fg_sum_.float(), min=1.0)
+                rcnn_loss_reg = (rcnn_loss_reg.view(rcnn_batch_size, -1) * fg_mask.unsqueeze(dim=-1).float())
+                # fg_sum_ = fg_mask.reshape(batch_size, -1).long().sum(-1).float()
+                # if 'sem_scores_lambda_p' in forward_ret_dict:
+                # by default sem_scores_lambda_p is 1 thus the loss is unaffected. only works in softmatch 
+                rcnn_loss_reg *=  forward_ret_dict['sem_scores_lambda_p'].view(-1).unsqueeze(dim=-1)  # sem_scores_lambda_p 0-1
+                fg_sum_ =  (fg_mask*forward_ret_dict['sem_scores_lambda_p'].view(-1)).reshape(batch_size, -1).sum(-1).float()
+                rcnn_loss_reg = rcnn_loss_reg.reshape(batch_size, -1).sum(-1) / torch.clamp(fg_sum_, min=1.0)
+
             rcnn_loss_reg = rcnn_loss_reg * loss_cfgs.LOSS_WEIGHTS['rcnn_reg_weight']
             tb_dict['rcnn_loss_reg'] = rcnn_loss_reg.item() if scalar else rcnn_loss_reg
 
@@ -314,7 +319,9 @@ class RoIHeadTemplate(nn.Module):
                 batch_loss_cls = batch_loss_cls.reshape(batch_size, -1)
                 cls_valid_mask = cls_valid_mask.reshape(batch_size, -1)
                 if 'rcnn_cls_weights' in forward_ret_dict:
-                    rcnn_cls_weights = forward_ret_dict['sem_scores_lambda_p']*forward_ret_dict['rcnn_cls_weights']
+                    rcnn_cls_weights = forward_ret_dict['rcnn_cls_weights']
+                    if 'sem_scores_lambda_p' in forward_ret_dict:
+                        rcnn_cls_weights *= forward_ret_dict['sem_scores_lambda_p']
                     rcnn_loss_cls_norm = (cls_valid_mask * rcnn_cls_weights).sum(-1)
                     rcnn_loss_cls = (batch_loss_cls * cls_valid_mask * rcnn_cls_weights).sum(-1) / torch.clamp(rcnn_loss_cls_norm, min=1.0)
                 else:
