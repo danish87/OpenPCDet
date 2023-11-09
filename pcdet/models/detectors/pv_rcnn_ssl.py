@@ -539,7 +539,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pseudo_sem_score_lambda_p = pseudo_sem_scores_lambda_p[i]
                 if diff > 0:
                     pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
-                    pseudo_sem_score_lambda_p = torch.cat([pseudo_sem_score_lambda_p, -torch.ones((diff,), device=pseudo_box.device)], dim=0)
+                    pseudo_sem_score_lambda_p = torch.cat([pseudo_sem_score_lambda_p, torch.ones((diff,), device=pseudo_box.device)], dim=0)
 
                 batch_dict[key][unlabeled_inds[i]] = pseudo_box
                 batch_dict['sem_scores_lambda_p'][unlabeled_inds[i]] = pseudo_sem_score_lambda_p
@@ -551,20 +551,20 @@ class PVRCNN_SSL(Detector3DTemplate):
             new_boxes = torch.zeros((ori_boxes.shape[0], max_pseudo_box_num, ori_boxes.shape[2]),
                                     device=ori_boxes.device)
             new_ins_idx = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=-1, device=ori_boxes.device)
-            new_lambda_p = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=-1, device=ori_boxes.device)
+            new_lambda_p = torch.full((ori_boxes.shape[0], max_pseudo_box_num), fill_value=1, device=ori_boxes.device)
 
             for idx in labeled_inds:
                 diff = max_pseudo_box_num - ori_boxes[idx].shape[0]
                 new_box = torch.cat([ori_boxes[idx], torch.zeros((diff, 8), device=ori_boxes[idx].device)], dim=0)
                 new_boxes[idx] = new_box
                 new_ins_idx[idx] = torch.cat([ori_ins_ids[idx], -torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
-                new_lambda_p[idx] = torch.cat([ori_lambda_p[idx], -torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
+                new_lambda_p[idx] = torch.cat([ori_lambda_p[idx], torch.ones((diff,), device=ori_boxes[idx].device)], dim=0)
             for i, pseudo_box in enumerate(pseudo_boxes):
                 pseudo_sem_score_lambda_p = pseudo_sem_scores_lambda_p[i]
                 diff = max_pseudo_box_num - pseudo_box.shape[0]
                 if diff > 0:
                     pseudo_box = torch.cat([pseudo_box, torch.zeros((diff, 8), device=pseudo_box.device)], dim=0)
-                    pseudo_sem_score_lambda_p = torch.cat([pseudo_sem_score_lambda_p, -torch.ones((diff,), device=pseudo_box.device)], dim=0)
+                    pseudo_sem_score_lambda_p = torch.cat([pseudo_sem_score_lambda_p, torch.ones((diff,), device=pseudo_box.device)], dim=0)
                 new_boxes[unlabeled_inds[i]] = pseudo_box
                 new_lambda_p[unlabeled_inds[i]] = pseudo_sem_score_lambda_p
             batch_dict[key] = new_boxes
