@@ -492,6 +492,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 pseudo_boxes.append(torch.cat([boxs, labels.view(-1, 1).float()], dim=1))
                 pseudo_sem_scores.append(sem_scores)
                 pseudo_scores.append(scores)
+                pseudo_sem_scores_lambda_p.append(sem_scores_lambda_p)
                 continue
 
             conf_thresh = torch.tensor(self.thresh, device=labels.device).unsqueeze(
