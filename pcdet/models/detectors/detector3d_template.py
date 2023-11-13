@@ -252,10 +252,12 @@ class Detector3DTemplate(nn.Module):
                 if batch_dict.get('has_class_labels', False):
                     label_key = 'roi_labels' if 'roi_labels' in batch_dict else 'batch_pred_labels'
                     label_preds = batch_dict[label_key][index]
-                    sem_scores = torch.sigmoid(batch_dict['roi_scores'][index])
+                    # sem_scores = torch.sigmoid(batch_dict['roi_scores'][index])
                     sem_scores_multiclass = batch_dict['roi_scores_multiclass'][index]
+                    sem_scores, label_preds = torch.max(sem_scores_multiclass, dim=-1)
                     thresh_masks = batch_dict['pre_nms_thresh_masks'][index] if 'pre_nms_thresh_masks' in batch_dict else None
                     lambda_p = batch_dict['pre_nms_lambda_p'][index] if 'pre_nms_lambda_p' in batch_dict else None
+                    label_preds = label_preds + 1
                 else:
                     label_preds = label_preds + 1
                 # Should be True to preserve the order of roi's passed from the student

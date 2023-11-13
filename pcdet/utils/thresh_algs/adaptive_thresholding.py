@@ -42,9 +42,10 @@ class AdaptiveThresholding(Metric):
         super().__init__(**configs)
 
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
-        self.prior_sem_fg_thresh = configs.get('SEM_FG_THRESH', 0.33)
+        self.prior_sem_fg_thresh = configs.get('CONF_FG_THRESH', 0.33)
         self.thresh_method = configs.get('THRESH_METHOD', None)
         self.target_to_align = configs.get('TARGET_TO_ALIGN', None)
+        self.enable_adaptive_fg_thr = configs.get('ENABLE_ADAPTIVE_FG', False)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)
         self.fixed_thresh = configs.get('FIXED_THRESH', 0.9)
         self.momentum = configs.get('MOMENTUM', 0.9)
@@ -53,12 +54,13 @@ class AdaptiveThresholding(Metric):
         self.states_name = ['sem_scores_wa', 'sem_scores_sa', 'conf_scores_wa', 'conf_scores_sa']
         self.class_names = ['Car', 'Pedestrian', 'Cyclist']
         self.iteration_count = 0
-
+        self.pre_filtering_thresh = 0.1
         # States are of shape (N, M, P) where N is # samples, M is # RoIs and P = 4 is the Car, Ped, Cyc, FG scores
         for name in self.states_name:
             self.add_state(name, default=[], dist_reduce_fx='cat')
 
         # mean_p_model aka p_target (_lbl(mean_p_model)) and p_model (_ulb(mean_p_model))
+        self.prior_fg_conf_thresh = {s_name: None for s_name in self.states_name}
         self.mean_p_model = {s_name: None for s_name in self.states_name}
         self.var_p_model = {s_name: None for s_name in self.states_name}
         self.mean_p_max_model = {s_name: None for s_name in self.states_name}
@@ -75,11 +77,13 @@ class AdaptiveThresholding(Metric):
         self.mu2=configs.get('MU2', 0.9)
         self.gmm = GaussianMixture(
             n_components=2,
-            weights_init=[0.5, 0.5],
+            weights_init=[0.25, 0.75],
             means_init=[[self.mu1], [self.mu2]],
             precisions_init=[[[1.0]], [[1.0]]],
             init_params='k-means++',
-            tol=1e-9,
+            tol=1e-11,
+            reg_covar=1e-09,
+            random_state=0,
             max_iter=1000
         )
 
@@ -143,12 +147,21 @@ class AdaptiveThresholding(Metric):
         accumulated_metrics = self._accumulate_metrics()
         for sname in ['sem_scores_wa', 'sem_scores_sa']:
             sem_scores = accumulated_metrics[sname]
-            conf_scores = accumulated_metrics[sname.replace('sem', 'conf')]
-
             max_scores, labels = torch.max(sem_scores, dim=-1)
-            fg_thresh = torch.tensor(self.prior_sem_fg_thresh, dtype=torch.float, device=sem_scores.device).unsqueeze(0)
+            
+            # Use GMM based adaptive fg thr and use EMA version to calc fg_mask
+            csname =sname.replace('sem', 'conf')
+            conf_scores = accumulated_metrics[csname]
+            
+            fg_thresh = self.prior_sem_fg_thresh
+            self._update_ema('prior_fg_conf_thresh', self._get_adaptive_thresholds(conf_scores, labels).clip(0.1,0.9), csname) # ema
+            if self.enable_adaptive_fg_thr:
+                fg_thresh = self.prior_fg_conf_thresh[csname].tolist()
+                
+            fg_thresh = torch.tensor(fg_thresh, dtype=torch.float, device=sem_scores.device).unsqueeze(0)
             fg_thresh = fg_thresh.expand_as(sem_scores).gather(dim=-1, index=labels.unsqueeze(-1)).squeeze()
             fg_mask =  conf_scores.squeeze() > fg_thresh   # TODO: Make it dynamic. Also not the same for both labeled and unlabeled data
+            
             hist_minlength = sem_scores.shape[-1]
             mean_p_max_model, var_p_max_model, labels_hist = self._get_mean_var_p_max_model_and_label_hist(max_scores, labels, fg_mask, hist_minlength)
             fg_scores_p_model_lbl = _lbl(sem_scores, fg_mask)
@@ -205,7 +218,8 @@ class AdaptiveThresholding(Metric):
             results[f'threshold/{thresh_alg}'] = self._get_threshold(thresh_alg=thresh_alg)
             if 'FreeMatch' in thresh_alg:
                 results[f'threshold/{thresh_alg}'] = self._arr2dict(results[f'threshold/{thresh_alg}'])
-                
+        csname =sname.replace('sem', 'conf')
+        results[f'fg_threshold/{csname}'] = self._arr2dict(self.prior_fg_conf_thresh[csname])                
 
     def draw_dist_plots(self, max_scores, labels, fg_mask, tag, meta_info=''):
 
@@ -245,15 +259,15 @@ class AdaptiveThresholding(Metric):
             print("Skipping rectification as iteration count is 0")
             return
 
-        max_scores, labels = torch.max(sem_scores_ulb, dim=-1)
-        fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+        # max_scores, labels = torch.max(sem_scores_ulb, dim=-1)
+        # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+        #     max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
 
-        fg_mask = max_scores > fg_thresh
+        # fg_mask = max_scores > fg_thresh
 
         rect_scores = sem_scores_ulb * self.ratio[target_tag]
         rect_scores /= rect_scores.sum(dim=-1, keepdims=True)
-        sem_scores_ulb[fg_mask] = rect_scores[fg_mask]  # Only rectify FG rois
+        sem_scores_ulb = rect_scores  # Only rectify FG rois
 
         return sem_scores_ulb
 
@@ -267,9 +281,9 @@ class AdaptiveThresholding(Metric):
         if self.target_to_align is not None:
             scores = self.rectify_sem_scores(scores, target_tag=self.target_to_align)
         max_scores, labels = torch.max(scores, dim=-1)
-        fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-        max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-        fg_mask = max_scores > fg_thresh
+        # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+        # max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+        # fg_mask = max_scores > fg_thresh
         lambda_p_weights = None
         
         if self.thresh_method == 'AdaMatch':
@@ -290,7 +304,7 @@ class AdaptiveThresholding(Metric):
             scaled_var = (2 * var / (n_sigma ** 2))
             lambda_p_weights = torch.exp(-((torch.clamp(max_scores - mu, max=0.0) ** 2) / scaled_var))
         
-        return thresh_mask, fg_mask, lambda_p_weights
+        return thresh_mask, scores, lambda_p_weights
 
     def _get_threshold(self, sem_scores_wa_lbl=None, tag='sem_scores_wa', thresh_alg='AdaMatch'):
         
@@ -315,3 +329,13 @@ class AdaptiveThresholding(Metric):
             return {cls: array[cind] for cind, cls in enumerate(self.class_names)}
         else:
             raise ValueError(f"Invalid array shape: {array.shape}")
+ 
+    def _get_adaptive_thresholds(self, scores, labels):
+        adaptive_thr = torch.ones(len(self.class_names)) / len(self.class_names)
+        for cind in range(len(self.class_names)):
+            cls_mask = labels==cind
+            cls_scores = scores[cls_mask]
+            cls_scores = cls_scores[cls_scores>self.pre_filtering_thresh].cpu().numpy().reshape(-1, 1)
+            self.gmm.fit(cls_scores)
+            adaptive_thr[cind] = np.max(self.gmm.means_)
+        return adaptive_thr

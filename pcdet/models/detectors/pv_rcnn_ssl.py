@@ -10,7 +10,7 @@ from .detector3d_template import Detector3DTemplate
 from .pv_rcnn import PVRCNN
 
 from pcdet.utils import common_utils
-from pcdet.utils.stats_utils import metrics_registry
+from pcdet.utils.stats_utils import metrics_registry, get_max_iou_with_same_class
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 from pcdet.utils.thresh_algs import thresh_registry
@@ -161,7 +161,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         thresh_masks = torch.ones_like(batch_dict_ema['roi_scores'], dtype=torch.bool)
         lambda_p = torch.ones_like(batch_dict_ema['roi_scores'])
         if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
-            ulb_thresh_masks, fg_mask, ulb_lambda_p = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds])
+            ulb_thresh_masks, batch_dict_ema['roi_scores_multiclass'][ulb_inds], ulb_lambda_p = self.thresh_alg.get_mask(batch_dict_ema['roi_scores_multiclass'][ulb_inds])
             if self.thresh_alg.thresh_method == 'SoftMatch':
                 lambda_p[ulb_inds] = ulb_lambda_p
             else:
@@ -189,6 +189,11 @@ class PVRCNN_SSL(Detector3DTemplate):
 
         # apply student's augs on teacher's pseudo-labels (filtered) only (not points)
         batch_dict = self.apply_augmentation(batch_dict, batch_dict, ulb_inds, key='gt_boxes')
+        # pl_labels, pl_boxes= batch_dict['gt_boxes'][ulb_inds][...,-1].view(-1).int()-1, batch_dict['gt_boxes'][ulb_inds][...,:-1].view(-1, 7)
+        # gt_labels, gt_boxes = batch_dict['ori_unlabeled_boxes'][...,-1].view(-1).int(), batch_dict['ori_unlabeled_boxes'][...,:-1].view(-1, 7)
+        # valid_mask = torch.logical_not(torch.all(pl_boxes == 0, dim=-1))
+        # pl_labels, pl_boxes = pl_labels[valid_mask], pl_boxes[valid_mask]
+        # max_overlaps, gt_assignment = get_max_iou_with_same_class(pl_boxes, pl_labels, gt_boxes, gt_labels)
 
         for cur_module in self.pv_rcnn.module_list:
             batch_dict = cur_module(batch_dict)
