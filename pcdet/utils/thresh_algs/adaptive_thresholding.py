@@ -44,7 +44,7 @@ class AdaptiveThresholding(Metric):
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
         self.prior_sem_fg_thresh = configs.get('CONF_FG_THRESH', 0.33)
         self.thresh_method = configs.get('THRESH_METHOD', None)
-        self.target_to_align = configs.get('TARGET_TO_ALIGN', None)
+        self.target_to_align = configs.get('TARGET_TO_ALIGN', '')
         self.enable_adaptive_fg_thr = configs.get('ENABLE_ADAPTIVE_FG', False)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)
         self.fixed_thresh = configs.get('FIXED_THRESH', 0.9)
@@ -171,10 +171,10 @@ class AdaptiveThresholding(Metric):
             mean_p_model = torch.vstack([mean_p_model_lbl, mean_p_model_ulb])
             var_p_model = torch.vstack([var_p_model_lbl, var_p_model_ulb])
 
-            self._update_ema('mean_p_max_model', mean_p_max_model, sname)
+            self._update_ema('mean_p_max_model', mean_p_max_model.clip(0.1,0.9), sname)
             self._update_ema('var_p_max_model', var_p_max_model, sname)
             self._update_ema('labels_hist', labels_hist, sname)
-            self._update_ema('mean_p_model', mean_p_model, sname)
+            self._update_ema('mean_p_model', mean_p_model.clip(0.1,0.9), sname)
             self._update_ema('var_p_model', var_p_model, sname)
 
             self.log_results(results, sname=sname)
@@ -259,15 +259,15 @@ class AdaptiveThresholding(Metric):
             print("Skipping rectification as iteration count is 0")
             return
 
-        # max_scores, labels = torch.max(sem_scores_ulb, dim=-1)
-        # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
-        #     max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
+        max_scores, labels = torch.max(sem_scores_ulb, dim=-1)
+        fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
+            max_scores.shape[0], max_scores.shape[1], 1).gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
 
-        # fg_mask = max_scores > fg_thresh
+        fg_mask = max_scores > fg_thresh
 
         rect_scores = sem_scores_ulb * self.ratio[target_tag]
         rect_scores /= rect_scores.sum(dim=-1, keepdims=True)
-        sem_scores_ulb = rect_scores  # Only rectify FG rois
+        sem_scores_ulb[fg_mask] = rect_scores[fg_mask]  # Only rectify FG rois
 
         return sem_scores_ulb
 
@@ -278,7 +278,7 @@ class AdaptiveThresholding(Metric):
     def get_mask(self, scores):
         assert self.thresh_method in ['AdaMatch', 'FreeMatch', 'SoftMatch'], f'{self.thresh_method} not in list [AdaMatch, FreeMatch, SoftMatch]'
         
-        if self.target_to_align is not None:
+        if self.target_to_align in ['lab', 'uniform', 'gt']:
             scores = self.rectify_sem_scores(scores, target_tag=self.target_to_align)
         max_scores, labels = torch.max(scores, dim=-1)
         # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, device=labels.device).unsqueeze(0).repeat(
@@ -337,5 +337,16 @@ class AdaptiveThresholding(Metric):
             cls_scores = scores[cls_mask]
             cls_scores = cls_scores[cls_scores>self.pre_filtering_thresh].cpu().numpy().reshape(-1, 1)
             self.gmm.fit(cls_scores)
-            adaptive_thr[cind] = np.max(self.gmm.means_)
+            gmm_assignment = self.gmm.predict(cls_scores)  
+            gmm_scores = self.gmm.score_samples(cls_scores) 
+            if np.any(gmm_assignment == 1) and self.gmm_policy == 'high':
+                gmm_scores[gmm_assignment == 0] = -np.inf  
+                index = np.argmax(gmm_scores, axis=0) 
+                pos_indx = ((gmm_assignment == 1) & (cls_scores >= cls_scores[index]).squeeze())  
+                if np.sum(pos_indx):  adaptive_thr[cind] = np.min(cls_scores[pos_indx]).item()
+            elif self.gmm_policy == 'middle': adaptive_thr[cind] = np.min(cls_scores[gmm_assignment == 1]).item()
+            elif self.gmm_policy == 'percentile75': adaptive_thr[cind] = np.percentile(cls_scores[gmm_assignment == 1], 75).item()
+            elif self.gmm_policy == 'percentile25': adaptive_thr[cind] = np.percentile(cls_scores[gmm_assignment == 1], 25).item()
+            else:
+                adaptive_thr[cind] = np.mean(self.gmm.means_).item()
         return adaptive_thr
