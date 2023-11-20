@@ -14,7 +14,7 @@ from pcdet.utils.stats_utils import metrics_registry
 from pcdet.utils.prototype_utils import feature_bank_registry
 from collections import defaultdict
 from pcdet.utils.thresh_algs import thresh_registry
-from visual_utils import open3d_vis_utils as V
+#from visual_utils import open3d_vis_utils as V
 
 
 class PVRCNN_SSL(Detector3DTemplate):
