@@ -3,7 +3,7 @@ from ...ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_stac
 from ...utils import common_utils
 from .roi_head_template import RoIHeadTemplate
 from pcdet.utils.prototype_utils import feature_bank_registry
-
+from pcdet.config import cfg
 
 class PVRCNNHead(RoIHeadTemplate):
     def __init__(self, input_channels, model_cfg, num_class=1,
@@ -152,7 +152,7 @@ class PVRCNNHead(RoIHeadTemplate):
         """
         nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
         if self.training: # training
-            temprature_Scaling = 0.1 if test_only else 4 # teacher, student respectively
+            temprature_Scaling = cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE if test_only else cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE_SA # teacher, student respectively
         else: # eval
             temprature_Scaling = 1
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
