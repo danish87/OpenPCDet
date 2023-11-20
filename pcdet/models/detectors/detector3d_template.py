@@ -252,7 +252,7 @@ class Detector3DTemplate(nn.Module):
                 if batch_dict.get('has_class_labels', False):
                     label_key = 'roi_labels' if 'roi_labels' in batch_dict else 'batch_pred_labels'
                     label_preds = batch_dict[label_key][index]
-                    sem_scores = torch.sigmoid(batch_dict['roi_scores'][index])
+                    sem_scores = batch_dict['roi_scores'][index]
                     sem_scores_multiclass = batch_dict['roi_scores_multiclass'][index]
                     thresh_masks = batch_dict['pre_nms_thresh_masks'][index] if 'pre_nms_thresh_masks' in batch_dict else None
                 else:

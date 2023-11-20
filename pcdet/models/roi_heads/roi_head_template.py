@@ -94,7 +94,7 @@ class RoIHeadTemplate(nn.Module):
         return fc_layers
 
     @torch.no_grad()
-    def proposal_layer(self, batch_dict,  nms_config):
+    def proposal_layer(self, batch_dict,  nms_config, temprature_Scaling=1):
         """
         Args:
             batch_dict:
@@ -117,10 +117,19 @@ class RoIHeadTemplate(nn.Module):
 
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
+        batch_dict['cls_preds_normalized'] = True
+        batch_dict['batch_cls_preds'] = torch.softmax(torch.sigmoid(batch_dict['batch_cls_preds']) / temprature_Scaling, dim=-1)
         batch_cls_preds = batch_dict['batch_cls_preds']
+
+        thresh_masks = batch_cls_preds.new_ones(batch_cls_preds.shape[:-1], dtype=torch.bool)
+        if 'thresh_registry' in batch_dict and batch_dict['thresh_registry'].iteration_count > 0:
+            ulb_thresh_masks = batch_dict['thresh_registry'].get_mask(batch_cls_preds[batch_dict['unlabeled_inds']], thresh_alg='AdaMatch')
+            thresh_masks[batch_dict['unlabeled_inds']] = ulb_thresh_masks
+        
         rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
         roi_scores = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE))
         roi_labels = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
+        pre_nms_thresh_masks = batch_box_preds.new_ones((batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.bool)
         roi_scores_multiclass = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_cls_preds.shape[-1]))
         roi_ious = batch_cls_preds.new_zeros(batch_cls_preds.shape[:-1])
         for index in range(batch_size):
@@ -151,12 +160,14 @@ class RoIHeadTemplate(nn.Module):
             rois[index, :len(selected), :] = box_preds[selected]
             roi_scores[index, :len(selected)] = cur_roi_scores[selected]
             roi_labels[index, :len(selected)] = cur_roi_labels[selected]
+            pre_nms_thresh_masks[index, :len(selected)] = thresh_masks[batch_mask][selected]
             roi_scores_multiclass[index, :len(selected), :] = cls_preds[selected]
             roi_ious[index] = max_overlaps
         batch_dict['rois'] = rois
         batch_dict['roi_scores'] = roi_scores
-        batch_dict['roi_scores_multiclass'] = torch.sigmoid(roi_scores_multiclass)
-        batch_dict['roi_scores_multiclass_rpn'] = torch.sigmoid(batch_cls_preds)
+        batch_dict['roi_scores_multiclass_rpn'] = batch_cls_preds
+        batch_dict['roi_scores_multiclass'] = roi_scores_multiclass
+        batch_dict['pre_nms_thresh_masks'] = pre_nms_thresh_masks
         batch_dict['roi_ious'] = roi_ious
         batch_dict['roi_labels'] = roi_labels + 1
         batch_dict['has_class_labels'] = batch_cls_preds.shape[-1] > 1

@@ -156,13 +156,13 @@ class AdaMatch(Metric):
             # fg_mask =  conf_scores.squeeze() > fg_thresh   # TODO: Make it dynamic. Also not the same for both labeled and unlabeled data
             if sname == 'sem_scores_sa':
                 fg_mask = (acc_metrics['box_cls_labels_sa'] > 0).squeeze()
-                sem_scores = torch.softmax(sem_scores / self.temperature_sa, dim=-1)  # avg ent of 0.85 with temp 2
+                #sem_scores = torch.softmax(sem_scores / self.temperature_sa, dim=-1)  # avg ent of 0.85 with temp 2
             elif sname in ['sem_scores_wa']:
                 fg_mask = (acc_metrics['roi_ious_wa'] > self.prior_sem_fg_thresh).squeeze()
-                sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
+                #sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
             elif sname in ['sem_scores_pre_gt_wa']:
                 fg_mask = (acc_metrics['roi_ious_pre_gt_wa'] > self.prior_sem_fg_thresh).squeeze()
-                sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
+                #sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
 
             max_scores, labels = torch.max(sem_scores, dim=-1)
 

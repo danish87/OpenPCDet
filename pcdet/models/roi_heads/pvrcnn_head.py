@@ -151,9 +151,13 @@ class PVRCNNHead(RoIHeadTemplate):
         :return:
         """
         nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
+        if self.training: # training
+            temprature_Scaling = 0.1 if test_only else 4 # teacher, student respectively
+        else: # eval
+            temprature_Scaling = 1
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
         # However, for labeled data proposal layer should continue!
-        targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config)
+        targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config, temprature_Scaling=temprature_Scaling)
         # should not use gt_roi for pseudo label generation
         if (self.training or self.print_loss_when_eval) and not test_only:
             targets_dict = self.assign_targets(batch_dict)
@@ -161,7 +165,8 @@ class PVRCNNHead(RoIHeadTemplate):
             batch_dict['roi_scores'] = targets_dict['roi_scores']
             batch_dict['roi_labels'] = targets_dict['roi_labels']
             batch_dict['roi_scores_multiclass'] = targets_dict['roi_scores_multiclass']
-            batch_dict['roi_scores_multiclass_rpn'] = targets_dict['roi_scores_multiclass_rpn']
+            # batch_dict['roi_scores_multiclass_rpn'] = targets_dict['roi_scores_multiclass_rpn']
+            batch_dict['pre_nms_thresh_masks'] = targets_dict['pre_nms_thresh_masks']
             batch_dict['rcnn_cls_labels'] = targets_dict['rcnn_cls_labels']
             (batch_dict['rcnn_cls_labels'] == -1).any().item() and print('rcnn_cls_labels has -1')
             batch_dict['gt_iou_of_rois'] = targets_dict['gt_iou_of_rois']

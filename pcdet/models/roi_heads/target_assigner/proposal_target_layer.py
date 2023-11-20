@@ -56,6 +56,7 @@ class ProposalTargetLayer(nn.Module):
         batch_reg_valid_mask = rois.new_zeros((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.long)
         batch_cls_labels = -rois.new_ones(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE)
         interval_mask = rois.new_zeros(batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE, dtype=torch.bool)
+        pre_nms_thresh_masks = rois.new_ones((batch_size, self.roi_sampler_cfg.ROI_PER_IMAGE), dtype=torch.bool)
 
         for index in range(batch_size):
             cur_gt_boxes = batch_dict['gt_boxes'][index]
@@ -83,12 +84,14 @@ class ProposalTargetLayer(nn.Module):
             batch_reg_valid_mask[index] = cur_reg_valid_mask
             batch_cls_labels[index] = cur_cls_labels
             interval_mask[index] = cur_interval_mask
+            pre_nms_thresh_masks[index] = batch_dict['pre_nms_thresh_masks'][index][sampled_inds]
 
         return {'rois': batch_rois, 'gt_of_rois': batch_gt_of_rois, 'gt_iou_of_rois': batch_roi_ious,
                 'roi_scores': batch_roi_scores, 'roi_scores_multiclass': batch_roi_scores_multiclass,
-                'roi_scores_multiclass_rpn': batch_dict['batch_cls_preds'].clone().detach(),
+                # 'roi_scores_multiclass_rpn': batch_dict['batch_cls_preds'].clone().detach(),
                 'roi_labels': batch_roi_labels, 'reg_valid_mask': batch_reg_valid_mask,
-                'rcnn_cls_labels': batch_cls_labels, 'interval_mask': interval_mask}
+                'rcnn_cls_labels': batch_cls_labels, 'interval_mask': interval_mask ,'pre_nms_thresh_masks': pre_nms_thresh_masks
+                }
 
     def subsample_unlabeled_rois_default(self, batch_dict, index):
         cur_roi = batch_dict['rois'][index]
