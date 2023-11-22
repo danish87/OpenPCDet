@@ -504,7 +504,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             reliable_mask = scores > conf_thresh.squeeze()
 
-            if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
+            if self.adapt_thresholding and self.thresh_alg.iteration_count > 0 and self.thresh_alg.enable_adamatch_thr:
                 reliable_mask = torch.logical_and(reliable_mask, pseudo_pre_nms_thresh_masks)
             else:
                 sem_conf_thresh = torch.tensor(self.sem_thresh, device=labels.device).unsqueeze(

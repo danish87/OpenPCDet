@@ -43,7 +43,8 @@ class AdaMatch(Metric):
 
     def __init__(self, **configs):
         super().__init__(**configs)
-
+        self.enable_adamatch_thr = configs.get('ENABLE_THR', False)
+        self.enable_adamatch_pl_alignment = configs.get('ENABLE_PL_ALIGNMENT', False)
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
         self.prior_sem_fg_thresh = configs.get('SEM_FG_THRESH', 0.5)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)

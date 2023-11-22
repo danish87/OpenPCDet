@@ -122,7 +122,7 @@ class RoIHeadTemplate(nn.Module):
         batch_cls_preds = batch_dict['batch_cls_preds']
 
         thresh_masks = batch_cls_preds.new_ones(batch_cls_preds.shape[:-1], dtype=torch.bool)
-        if 'thresh_registry' in batch_dict and batch_dict['thresh_registry'].iteration_count > 0:
+        if 'thresh_registry' in batch_dict and batch_dict['thresh_registry'].iteration_count > 0 and batch_dict['thresh_registry'].enable_adamatch_pl_alignment:
             ulb_thresh_masks = batch_dict['thresh_registry'].get_mask(batch_cls_preds[batch_dict['unlabeled_inds']], thresh_alg='AdaMatch')
             thresh_masks[batch_dict['unlabeled_inds']] = ulb_thresh_masks
         

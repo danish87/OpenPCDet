@@ -284,8 +284,9 @@ MODEL:
           BG_THRESH: 0.25
     ADAPTIVE_THRESH_CONFIG:
       AdaMatch:
-        ENABLE: True
-        ENABLE_PL_ALIGNMENT: False
+        ENABLE: True # to have log
+        ENABLE_THR: False # to apply adamatch filtering
+        ENABLE_PL_ALIGNMENT: False # to apply alignement
         TEMPERATURE: 0.1
         TEMPERATURE_SA: 4.0
         FIXED_THRESH: 0.9
