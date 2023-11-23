@@ -68,7 +68,7 @@ class AdaMatch(Metric):
         self.mean_p_max_model = {s_name: None for s_name in self.states_name}
         self.labels_hist = {s_name: None for s_name in self.states_name}
         self.ratio = {'AdaMatch': None}
-
+        self.mean_iou = {s_name: None for s_name in self.states_name}
         # Two fixed targets dists
         self.mean_p_model['uniform'] = torch.ones(len(self.class_names)) / len(self.class_names)
         self.mean_p_model['gt'] = torch.tensor([0.85, 0.1, 0.05]).cuda()
@@ -140,7 +140,16 @@ class AdaMatch(Metric):
             return torch.vstack([p_s0, p_s1]).squeeze(), torch.vstack([h_s0, h_s1])
         else:
             raise ValueError(f"Invalid split type: {split}")
-
+    
+    def _get_iou_mean(self, iou_scores, iou_labels, split):
+        _split = _lbl if split == 'lbl' else _ulb
+        iou_scores = _split(iou_scores)
+        iou_labels = _split(iou_labels)
+        mask = (iou_scores > 0.1).squeeze()
+        iou_scores = iou_scores[mask]
+        iou_labels = iou_labels[mask]
+        return torch.tensor([iou_scores[iou_labels==cind].mean().item() for cind in range(3)])
+    
     def compute(self):
         results = {}
 
@@ -151,25 +160,37 @@ class AdaMatch(Metric):
         acc_metrics = self._accumulate_metrics()
         for sname in ['sem_scores_wa', 'sem_scores_sa', 'sem_scores_pre_gt_wa']:
             sem_scores = acc_metrics[sname]
+            max_scores, labels = torch.max(sem_scores, dim=-1)
             # conf_scores = acc_metrics[sname.replace('sem', 'conf')]
-
             # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, dtype=torch.float, device=sem_scores.device).unsqueeze(0)
             # fg_thresh = fg_thresh.expand_as(sem_scores).gather(dim=-1, index=labels.unsqueeze(-1)).squeeze()
             # fg_mask =  conf_scores.squeeze() > fg_thresh   # TODO: Make it dynamic. Also not the same for both labeled and unlabeled data
             if sname == 'sem_scores_sa':
                 fg_mask = (acc_metrics['box_cls_labels_sa'] > 0).squeeze()
                 #sem_scores = torch.softmax(sem_scores / self.temperature_sa, dim=-1)  # avg ent of 0.85 with temp 2
-            elif sname in ['sem_scores_wa']:
-                fg_mask = (acc_metrics['roi_ious_wa'] > self.prior_sem_fg_thresh).squeeze()
+            else:
+                if sname in ['sem_scores_wa']:
+                    tag = 'roi_ious_wa'
+                elif sname in ['sem_scores_pre_gt_wa']:
+                    tag = 'roi_ious_pre_gt_wa'
+                iou_scores = acc_metrics[tag]
+                fg_mask = (iou_scores > self.prior_sem_fg_thresh).squeeze()
                 #sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
-            elif sname in ['sem_scores_pre_gt_wa']:
-                fg_mask = (acc_metrics['roi_ious_pre_gt_wa'] > self.prior_sem_fg_thresh).squeeze()
-                #sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
+                #NOTE  iou-scores for car and cyclist classes are significantly lower 
+                # classwise-mean(iou_scores > 0.1): 
+                # lbl [0.28641003370285034, 0.43848100304603577, 0.35272228717803955]
+                # ulb [0.26786571741104126, 0.3390975296497345, 0.28016719222068787]
+                mean_iou = torch.vstack([self._get_iou_mean(iou_scores, labels, 'lbl'), 
+                                         self._get_iou_mean(iou_scores, labels, 'ulb')])
+                self._update_ema('mean_iou', mean_iou.to(iou_scores.device), tag)
+                results[f'mean_iou_lbl/{tag}'] = self._arr2dict(_lbl(self.mean_iou[tag]))
+                results[f'mean_iou_ulb/{tag}'] = self._arr2dict(_ulb(self.mean_iou[tag]))
+                if self.enable_plots:
+                    fig = self.draw_dist_plots(iou_scores.squeeze(), labels, fg_mask, tag, meta_info=f"FG-thr {self.prior_sem_fg_thresh}")
+                    results[f'dist_plots_{tag}'] = fig
+                    plt.close()
 
-            max_scores, labels = torch.max(sem_scores, dim=-1)
-
-            hist_minlength = sem_scores.shape[-1]
-            mean_p_max_model, labels_hist = self._get_mean_p_max_model_and_label_hist(max_scores, labels, fg_mask, hist_minlength)
+            mean_p_max_model, labels_hist = self._get_mean_p_max_model_and_label_hist(max_scores, labels, fg_mask)
             mean_p_model_lbl = _lbl(sem_scores, fg_mask).mean(dim=0)
             mean_p_model_ulb = _ulb(sem_scores, fg_mask).mean(dim=0)
             mean_p_model = torch.vstack([mean_p_model_lbl, mean_p_model_ulb])
