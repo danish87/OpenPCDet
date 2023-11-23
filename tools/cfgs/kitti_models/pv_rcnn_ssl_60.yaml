@@ -287,11 +287,11 @@ MODEL:
         ENABLE: True # to have log
         ENABLE_THR: False # to apply adamatch filtering
         ENABLE_PL_ALIGNMENT: False # to apply alignement
-        TEMPERATURE: 0.1
-        TEMPERATURE_SA: 4.0
-        FIXED_THRESH: 0.9
+        TEMPERATURE: 1.0 # scaling for teacher/wa
+        TEMPERATURE_SA: 1.0 # no scaling for student/sa
+        FIXED_THRESH: 0.9 # relative threshold for adamatch
         MOMENTUM: 0.9
-        SEM_FG_THRESH: 0.5  # [0.65, 0.40, 0.45]
+        IOU_FG_THRESH: 0.3  # threshold to get fg-mask accumulated stats
         RESET_STATE_INTERVAL: 8
         ENABLE_PLOTS: True
         GMM_POLICY: high

@@ -46,7 +46,7 @@ class AdaMatch(Metric):
         self.enable_adamatch_thr = configs.get('ENABLE_THR', False)
         self.enable_adamatch_pl_alignment = configs.get('ENABLE_PL_ALIGNMENT', False)
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
-        self.prior_sem_fg_thresh = configs.get('SEM_FG_THRESH', 0.5)
+        self.prior_iou_fg_thresh = configs.get('SEM_FG_THRESH', 0.5)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)
         self.fixed_thresh = configs.get('FIXED_THRESH', 0.9)
         self.momentum = configs.get('MOMENTUM', 0.9)
@@ -145,7 +145,7 @@ class AdaMatch(Metric):
         _split = _lbl if split == 'lbl' else _ulb
         iou_scores = _split(iou_scores)
         iou_labels = _split(iou_labels)
-        mask = (iou_scores > 0.1).squeeze()
+        mask = (iou_scores > self.prior_iou_fg_thresh).squeeze()
         iou_scores = iou_scores[mask]
         iou_labels = iou_labels[mask]
         return torch.tensor([iou_scores[iou_labels==cind].mean().item() for cind in range(3)])
@@ -162,7 +162,7 @@ class AdaMatch(Metric):
             sem_scores = acc_metrics[sname]
             max_scores, labels = torch.max(sem_scores, dim=-1)
             # conf_scores = acc_metrics[sname.replace('sem', 'conf')]
-            # fg_thresh = torch.tensor(self.prior_sem_fg_thresh, dtype=torch.float, device=sem_scores.device).unsqueeze(0)
+            # fg_thresh = torch.tensor(self.prior_iou_fg_thresh, dtype=torch.float, device=sem_scores.device).unsqueeze(0)
             # fg_thresh = fg_thresh.expand_as(sem_scores).gather(dim=-1, index=labels.unsqueeze(-1)).squeeze()
             # fg_mask =  conf_scores.squeeze() > fg_thresh   # TODO: Make it dynamic. Also not the same for both labeled and unlabeled data
             if sname == 'sem_scores_sa':
@@ -174,7 +174,7 @@ class AdaMatch(Metric):
                 elif sname in ['sem_scores_pre_gt_wa']:
                     tag = 'roi_ious_pre_gt_wa'
                 iou_scores = acc_metrics[tag]
-                fg_mask = (iou_scores > self.prior_sem_fg_thresh).squeeze()
+                fg_mask = (iou_scores > self.prior_iou_fg_thresh).squeeze()
                 #sem_scores = torch.softmax(sem_scores / self.temperature, dim=-1)
                 #NOTE  iou-scores for car and cyclist classes are significantly lower 
                 # classwise-mean(iou_scores > 0.1): 
@@ -186,7 +186,7 @@ class AdaMatch(Metric):
                 results[f'mean_iou_lbl/{tag}'] = self._arr2dict(_lbl(self.mean_iou[tag]))
                 results[f'mean_iou_ulb/{tag}'] = self._arr2dict(_ulb(self.mean_iou[tag]))
                 if self.enable_plots:
-                    fig = self.draw_dist_plots(iou_scores.squeeze(), labels, fg_mask, tag, meta_info=f"FG-thr {self.prior_sem_fg_thresh}")
+                    fig = self.draw_dist_plots(iou_scores.squeeze(), labels, fg_mask, tag, meta_info=f"FG-thr {self.prior_iou_fg_thresh}")
                     results[f'dist_plots_{tag}'] = fig
                     plt.close()
 
@@ -265,15 +265,11 @@ class AdaMatch(Metric):
 
         return fig.get_figure()
 
-    def rectify_sem_scores(self, sem_scores_ulb):
+    def rectify_sem_scores(self, sem_scores_ulb, fg_mask):
 
         if self.iteration_count == 0:
             print("Skipping rectification as iteration count is 0")
             return
-
-        max_scores, labels = torch.max(sem_scores_ulb, dim=-1)
-        fg_mask = max_scores > self.prior_sem_fg_thresh
-
         rect_scores = sem_scores_ulb * self.ratio['AdaMatch']
         rect_scores /= rect_scores.sum(dim=-1, keepdims=True)
         sem_scores_ulb[fg_mask] = rect_scores[fg_mask]  # Only rectify FG rois
@@ -284,13 +280,13 @@ class AdaMatch(Metric):
         prob = getattr(self, p_name)
         prob[tag] = probs if prob[tag] is None else self.momentum * prob[tag] + (1 - self.momentum) * probs
 
-    def get_mask(self, scores, thresh_alg='AdaMatch'):
+    def get_mask(self, scores, iou_scores, thresh_alg='AdaMatch'):
+        fg_mask = iou_scores > self.prior_iou_fg_thresh
         if thresh_alg == 'AdaMatch':
-            rect_scores = self.rectify_sem_scores(scores)
-            max_rect_scores, labels = torch.max(rect_scores, dim=-1)
-            fg_mask = max_rect_scores > self.prior_sem_fg_thresh
-            thresh_mask = max_rect_scores > self._get_threshold(tag='sem_scores_pre_gt_wa', thresh_alg=thresh_alg)
-            return thresh_mask & fg_mask
+            scores = self.rectify_sem_scores(scores, fg_mask)
+            max_scores, labels = torch.max(scores, dim=-1)
+            thresh_mask = max_scores > self._get_threshold(tag='sem_scores_pre_gt_wa', thresh_alg=thresh_alg)
+            return scores, thresh_mask & fg_mask
 
         elif thresh_alg == 'FreeMatch':
             max_scores, labels = torch.max(scores, dim=-1)
@@ -298,14 +294,15 @@ class AdaMatch(Metric):
             multi_thresh = torch.zeros_like(scores)
             multi_thresh[:, :] = thresh
             multi_thresh = multi_thresh.gather(dim=2, index=labels.unsqueeze(-1)).squeeze()
-            return max_scores > multi_thresh
+            return scores, max_scores > multi_thresh
 
     def _get_threshold(self, sem_scores_wa_lbl=None, tag='sem_scores_wa', thresh_alg='AdaMatch'):
         if thresh_alg == 'AdaMatch':
             if sem_scores_wa_lbl is None:
                 return _lbl(self.mean_p_max_model[tag]) * self.fixed_thresh
+            # TODO get fg_mask from iou_scores
             max_scores, labels = torch.max(sem_scores_wa_lbl, dim=-1)
-            fg_mask = max_scores > self.prior_sem_fg_thresh
+            fg_mask = max_scores > self.prior_iou_fg_thresh
             fg_max_scores_lbl = max_scores[fg_mask]
             return fg_max_scores_lbl.mean() * self.fixed_thresh
 

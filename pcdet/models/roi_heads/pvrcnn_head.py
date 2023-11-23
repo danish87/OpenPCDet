@@ -152,12 +152,12 @@ class PVRCNNHead(RoIHeadTemplate):
         """
         nms_config = self.model_cfg.NMS_CONFIG['TRAIN' if self.training and not test_only else 'TEST']
         if self.training: # training
-            temprature_Scaling = cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE if test_only else cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE_SA # teacher, student respectively
+            temprature_scaling = cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE if test_only else cfg.MODEL.ADAPTIVE_THRESH_CONFIG.AdaMatch.TEMPERATURE_SA # teacher, student respectively
         else: # eval
-            temprature_Scaling = 1
+            temprature_scaling = 1
         # proposal_layer doesn't continue if the rois are already in the batch_dict.
         # However, for labeled data proposal layer should continue!
-        targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config, temprature_Scaling=temprature_Scaling)
+        targets_dict = self.proposal_layer(batch_dict, nms_config=nms_config, temprature_scaling=temprature_scaling)
         # should not use gt_roi for pseudo label generation
         if (self.training or self.print_loss_when_eval) and not test_only:
             targets_dict = self.assign_targets(batch_dict)
