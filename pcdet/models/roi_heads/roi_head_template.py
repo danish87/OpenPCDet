@@ -118,7 +118,7 @@ class RoIHeadTemplate(nn.Module):
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
         batch_dict['cls_preds_normalized'] = True
-        batch_dict['batch_cls_preds'] = torch.softmax(torch.sigmoid(batch_dict['batch_cls_preds']) / temprature_scaling, dim=-1)
+        batch_dict['batch_cls_preds'] = torch.softmax(batch_dict['batch_cls_preds'] / temprature_scaling, dim=-1)
         batch_cls_preds = batch_dict['batch_cls_preds']
 
         # calculate roi_iou_wrt_gt
