@@ -117,9 +117,9 @@ class RoIHeadTemplate(nn.Module):
 
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
-        batch_dict['cls_preds_normalized'] = True
-        batch_dict['batch_cls_preds'] = torch.softmax(batch_dict['batch_cls_preds'] / temprature_scaling, dim=-1)
-        batch_cls_preds = batch_dict['batch_cls_preds']
+        # get probabilities by exponentiate the log-softmax
+        batch_dict['roi_scores_multiclass_rpn'] = torch.exp(F.log_softmax(batch_dict['batch_cls_preds'] / temprature_scaling, dim=-1))
+        batch_cls_preds = batch_dict['roi_scores_multiclass_rpn']
 
         # calculate roi_iou_wrt_gt
         roi_ious = batch_cls_preds.new_zeros(batch_cls_preds.shape[:-1])
@@ -182,7 +182,6 @@ class RoIHeadTemplate(nn.Module):
 
         batch_dict['rois'] = rois
         batch_dict['roi_scores'] = roi_scores
-        batch_dict['roi_scores_multiclass_rpn'] = batch_cls_preds
         batch_dict['roi_scores_multiclass'] = roi_scores_multiclass
         batch_dict['pre_nms_thresh_masks'] = pre_nms_thresh_masks
         batch_dict['roi_ious'] = roi_ious

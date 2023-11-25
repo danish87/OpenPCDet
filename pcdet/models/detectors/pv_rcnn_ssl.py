@@ -42,6 +42,7 @@ class PVRCNN_SSL(Detector3DTemplate):
         self.thresh_config = self.model_cfg.ADAPTIVE_THRESH_CONFIG
 
         self.thresh_alg = None
+        self.adapt_thresholding = False
         for key, confs in self.thresh_config.items():
             thresh_registry.register(key, **confs)
             if confs['ENABLE']:
@@ -269,7 +270,7 @@ class PVRCNN_SSL(Detector3DTemplate):
                 feature_bank_registry.get(tag).compute()
 
         # update dynamic thresh alg
-        if results := self.thresh_alg.compute():
+        if self.adapt_thresholding and (results := self.thresh_alg.compute()):
             tb_dict_.update(results)
 
         for tag in metrics_registry.tags():
