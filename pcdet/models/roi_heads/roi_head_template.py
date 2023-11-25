@@ -93,6 +93,13 @@ class RoIHeadTemplate(nn.Module):
         fc_layers = nn.Sequential(*fc_layers)
         return fc_layers
 
+    @staticmethod
+    def get_rpn_prob_scores(logits, temperature_scaling=1, clamp=True, lower_bound = -10.0, upper_bound = 10.0):
+        if clamp:
+            logits = torch.clamp(logits, min=lower_bound, max=upper_bound)
+        log_softmax_probs = F.log_softmax(logits / temperature_scaling, dim=-1)
+        return torch.exp(log_softmax_probs)
+
     @torch.no_grad()
     def proposal_layer(self, batch_dict,  nms_config, temprature_scaling=1):
         """
@@ -117,9 +124,7 @@ class RoIHeadTemplate(nn.Module):
 
         batch_size = batch_dict['batch_size']
         batch_box_preds = batch_dict['batch_box_preds']
-        # get probabilities by exponentiate the log-softmax
-        batch_dict['roi_scores_multiclass_rpn'] = torch.exp(F.log_softmax(batch_dict['batch_cls_preds'] / temprature_scaling, dim=-1))
-        batch_cls_preds = batch_dict['roi_scores_multiclass_rpn']
+        batch_cls_preds = self.get_rpn_prob_scores(batch_dict['batch_cls_preds'], temprature_scaling)
 
         # calculate roi_iou_wrt_gt
         roi_ious = batch_cls_preds.new_zeros(batch_cls_preds.shape[:-1])
@@ -143,12 +148,13 @@ class RoIHeadTemplate(nn.Module):
         # filtering before nms
         thresh_masks = batch_cls_preds.new_ones(batch_cls_preds.shape[:-1], dtype=torch.bool)
         if 'thresh_registry' in batch_dict and batch_dict['thresh_registry'].iteration_count > 0 :
+            ulb_inds = batch_dict['unlabeled_inds']
             ulb_rect_scores, ulb_thresh_mask= \
-                batch_dict['thresh_registry'].get_mask(batch_cls_preds[batch_dict['unlabeled_inds']], roi_ious[batch_dict['unlabeled_inds']], thresh_alg='AdaMatch')
+                batch_dict['thresh_registry'].get_mask(batch_cls_preds[ulb_inds], roi_ious[ulb_inds], thresh_alg='AdaMatch')
             if batch_dict['thresh_registry'].enable_adamatch_pl_alignment:
-                batch_cls_preds[batch_dict['unlabeled_inds']] = ulb_rect_scores
+                batch_cls_preds[ulb_inds] = ulb_rect_scores
             if batch_dict['thresh_registry'].enable_adamatch_thr:
-                thresh_masks[batch_dict['unlabeled_inds']] = ulb_thresh_mask
+                thresh_masks[ulb_inds] = ulb_thresh_mask
         # NMS
         rois = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
         roi_scores = batch_box_preds.new_zeros((batch_size, nms_config.NMS_POST_MAXSIZE))
@@ -183,6 +189,7 @@ class RoIHeadTemplate(nn.Module):
         batch_dict['rois'] = rois
         batch_dict['roi_scores'] = roi_scores
         batch_dict['roi_scores_multiclass'] = roi_scores_multiclass
+        batch_dict['roi_scores_multiclass_rpn'] = batch_cls_preds
         batch_dict['pre_nms_thresh_masks'] = pre_nms_thresh_masks
         batch_dict['roi_ious'] = roi_ious
         batch_dict['roi_labels'] = roi_labels + 1
