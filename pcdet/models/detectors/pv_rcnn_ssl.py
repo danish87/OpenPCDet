@@ -155,10 +155,17 @@ class PVRCNN_SSL(Detector3DTemplate):
         return labeled_inds, unlabeled_inds
 
     @staticmethod
-    def pad_tensor(tensor_in, max_len=50):
-        diff_ = max_len - tensor_in.shape[1]
-        if diff_>0:
-            tensor_in = torch.cat([tensor_in, torch.zeros((tensor_in.shape[0], diff_, tensor_in.shape[-1]), device=tensor_in.device)], dim=1)
+    def pad_tensor(tensor_in, max_len=50, pad_dim=0):
+        if tensor_in.shape[0]!=1:
+            tensor_in=tensor_in.unsqueeze(0)
+        if len(list(tensor_in.shape))==2:
+            tensor_in=tensor_in.unsqueeze(2)
+        diff_ = max_len - tensor_in.shape[pad_dim]
+        if diff_ > 0:
+            pad_shape = list(tensor_in.shape)
+            pad_shape[pad_dim] = diff_
+            padding = torch.zeros(pad_shape, device=tensor_in.device)
+            tensor_in = torch.cat([tensor_in, padding], dim=pad_dim)
         return tensor_in
 
     def _forward_training(self, batch_dict):
@@ -199,22 +206,22 @@ class PVRCNN_SSL(Detector3DTemplate):
             pseudo_labels_teacher_pre_gt_sample, _ = self.pv_rcnn_ema.post_processing(batch_dict_pre_gt_sample, no_recall_dict=True)
             metrics_input_ = defaultdict(list)
             for ind in range(len(pseudo_labels_teacher_wa)):
-                metrics_input_['conf_scores_wa'].append(self.pad_tensor(pseudo_labels_teacher_wa[ind]['pred_scores'].unsqueeze(0).unsqueeze(2), max_len=100))
-                metrics_input_['sem_scores_wa'].append(self.pad_tensor(pseudo_labels_teacher_wa[ind]['pred_sem_scores_multiclass'].unsqueeze(0), max_len=100))
-                metrics_input_['conf_scores_pre_gt_wa'].append(self.pad_tensor(pseudo_labels_teacher_pre_gt_sample[ind]['pred_scores'].unsqueeze(0).unsqueeze(2), max_len=100))
-                metrics_input_['sem_scores_pre_gt_wa'].append(self.pad_tensor(pseudo_labels_teacher_pre_gt_sample[ind]['pred_sem_scores_multiclass'].unsqueeze(0), max_len=100))
-                metrics_input_['conf_scores_sa'].append(self.pad_tensor(pseudo_labels_student[ind]['pred_scores'].unsqueeze(0).unsqueeze(2), max_len=128))
-                metrics_input_['sem_scores_sa'].append(self.pad_tensor(pseudo_labels_student[ind]['pred_sem_scores_multiclass'].unsqueeze(0), max_len=128))
+                metrics_input_['conf_scores_wa'].append(self.pad_tensor(pseudo_labels_teacher_wa[ind]['pred_scores'], max_len=100, pad_dim=1))
+                metrics_input_['sem_scores_wa'].append(self.pad_tensor(pseudo_labels_teacher_wa[ind]['pred_sem_scores_multiclass'], max_len=100, pad_dim=1))
+                metrics_input_['conf_scores_pre_gt_wa'].append(self.pad_tensor(pseudo_labels_teacher_pre_gt_sample[ind]['pred_scores'], max_len=100, pad_dim=1))
+                metrics_input_['sem_scores_pre_gt_wa'].append(self.pad_tensor(pseudo_labels_teacher_pre_gt_sample[ind]['pred_sem_scores_multiclass'], max_len=100, pad_dim=1))
+                metrics_input_['conf_scores_sa'].append(self.pad_tensor(pseudo_labels_student[ind]['pred_scores'], max_len=128, pad_dim=1))
+                metrics_input_['sem_scores_sa'].append(self.pad_tensor(pseudo_labels_student[ind]['pred_sem_scores_multiclass'], max_len=128, pad_dim=1))
 
-            metrics_input = {'gt_labels_wa': self.pad_tensor(batch_dict_ema['gt_boxes'][..., 7:8].detach().clone(), max_len=100),  # (B, 100, 1)
+            metrics_input = {'gt_labels_wa': self.pad_tensor(batch_dict_ema['gt_boxes'][..., 7:8].detach().clone(), max_len=100, pad_dim=2).squeeze(0),  # (B, 100, 1)
                              'sem_scores_wa': torch.cat(metrics_input_['sem_scores_wa']).detach().clone(),  # (B, 100, 3)
                              'conf_scores_wa': torch.cat(metrics_input_['conf_scores_wa']).detach().clone(), # (B, 100, 1)
 
-                             'gt_labels_pre_gt_wa': self.pad_tensor(batch_dict_pre_gt_sample['gt_boxes'][..., 7:8].detach().clone(), max_len=100),  # (B, 100, 1)
+                             'gt_labels_pre_gt_wa': self.pad_tensor(batch_dict_pre_gt_sample['gt_boxes'][..., 7:8].detach().clone(), max_len=100, pad_dim=2).squeeze(0),  # (B, 100, 1)
                              'sem_scores_pre_gt_wa': torch.cat(metrics_input_['sem_scores_pre_gt_wa']).detach().clone(),  # (B, 100, 3)
                              'conf_scores_pre_gt_wa': torch.cat(metrics_input_['conf_scores_pre_gt_wa']).detach().clone(), # (B, 100, 1)
 
-                             'gt_labels_sa': self.pad_tensor(batch_dict['gt_boxes'][..., 7:8].detach().clone(), max_len=128),  # (B, 128, 1)
+                             'gt_labels_sa': self.pad_tensor(batch_dict['gt_boxes'][..., 7:8].detach().clone(), max_len=128, pad_dim=2).squeeze(0),  # (B, 128, 1)
                              'sem_scores_sa': torch.cat(metrics_input_['sem_scores_sa']).detach().clone(),  # (B, 128, 3)
                              'conf_scores_sa': torch.cat(metrics_input_['conf_scores_sa']).detach().clone(), # (B, 128, 1)
                              }
@@ -490,6 +497,22 @@ class PVRCNN_SSL(Detector3DTemplate):
         return pseudo_boxes, pseudo_labels, pseudo_scores, pseudo_sem_scores, pseudo_sem_scores_multi, pseudo_pre_nms_thresh_masks
 
     def _filter_pls(self, pls_dict, ulb_inds):
+        metrics_input_ = defaultdict(list)
+        keyset = list(pls_dict[0].keys())
+        for ind in range(len(pls_dict)):
+            for key in keyset:
+                val = pls_dict[ind][key]
+                if val is None: continue
+                metrics_input_[key].append(self.pad_tensor(val, max_len=100, pad_dim=1))
+        metrics_input={}
+        for key, val in metrics_input_.items():    
+            metrics_input[key]=torch.cat(val)
+        padding_mask = torch.logical_not(torch.all(metrics_input['pred_sem_scores_multiclass'][ulb_inds] == 0, dim=-1))
+        boxs, labels, scores, sem_scores, sem_scores_multi = (metrics_input['pred_boxes'][ulb_inds][padding_mask], 
+                                                              metrics_input['pred_labels'][ulb_inds][padding_mask],  
+                                                              metrics_input['pred_scores'][ulb_inds][padding_mask],  
+                                                              metrics_input['pred_sem_scores'][ulb_inds][padding_mask],  
+                                                              metrics_input['pred_sem_scores_multiclass'][ulb_inds][padding_mask])
         pseudo_boxes = []
         pseudo_scores = []
         pseudo_sem_scores = []
@@ -510,7 +533,7 @@ class PVRCNN_SSL(Detector3DTemplate):
 
             if self.adapt_thresholding and self.thresh_alg.iteration_count > 0:
                 # apply dynamic thresholding
-                sem_score_mask, rect_scores = self.thresh_alg.get_mask(sem_scores_multi, thresh_alg='FreeMatch')
+                sem_score_mask, rect_scores = self.thresh_alg.get_mask(sem_scores_multi)
                 sem_scores_multi_rect.append(rect_scores)
             else:
                 sem_conf_thresh = torch.tensor(self.sem_thresh, device=labels.device).unsqueeze(
