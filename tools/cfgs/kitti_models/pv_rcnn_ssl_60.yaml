@@ -285,15 +285,17 @@ MODEL:
     ADAPTIVE_THRESH_CONFIG:
       AdaMatch:
         ENABLE: True
+        ENABLE_DIST_ALIGNMENT: False
         THRESH_METHOD: AdaMatch # AdaMatch, FreeMatch
-        TARGET_TO_ALIGN: 'gt_labels_pre_gt_wa' # for AdaMatch only: sem_scores_wa or sem_scores_pre_gt_wa
+        TARGET_TO_ALIGN: 'gt_labels_pre_gt_wa' # for AdaMatch only: gt_labels_pre_gt_wa or uniform
+        SOURCE_ALIGN_METRIC: 'mean_p_model'  # for AdaMatch only: mean_p_model or labels_hist
         LBL_THRESH_TAG: 'sem_scores_wa' # for AdaMatch only: sem_scores_wa or sem_scores_pre_gt_wa
         TEMPERATURE: 4.0
         TEMPERATURE_SA: 4.0
         FIXED_THRESH: 0.7
         MOMENTUM: 0.9
         SEM_FG_THRESH: 0.5  # [0.65, 0.40, 0.45]
-        RESET_STATE_INTERVAL: 8
+        RESET_STATE_INTERVAL: 32
         ENABLE_PLOTS: True
         GMM_POLICY: high
         MU1: 0.1

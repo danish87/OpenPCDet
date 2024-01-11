@@ -45,8 +45,10 @@ class AdaMatch(Metric):
         super().__init__(**configs)
 
         self.reset_state_interval = configs.get('RESET_STATE_INTERVAL', 32)
+        self.enable_dist_alignment = configs.get('ENABLE_DIST_ALIGNMENT', True)
         self.thresh_method = configs.get('THRESH_METHOD', 'AdaMatch')
         self.target_to_align = configs.get('TARGET_TO_ALIGN', 'gt_labels_pre_gt_wa')
+        self.source_align_metric = configs.get('SOURCE_ALIGN_METRIC', 'mean_p_model')
         self.lab_thresh_tag = configs.get('LBL_THRESH_TAG','sem_scores_wa')
         self.prior_sem_fg_thresh = configs.get('SEM_FG_THRESH', 0.5)
         self.enable_plots = configs.get('ENABLE_PLOTS', False)
@@ -72,7 +74,7 @@ class AdaMatch(Metric):
         self.ratio = {'AdaMatch': None}
 
         # Two fixed targets dists
-        self.mean_p_model['uniform'] = torch.ones(len(self.class_names)) / len(self.class_names)
+        self.mean_p_model['uniform'] = torch.ones(len(self.class_names)).cuda() / len(self.class_names)
         self.mean_p_model['gt'] = torch.tensor([0.85, 0.1, 0.05]).cuda()
 
         # GMM
@@ -179,11 +181,25 @@ class AdaMatch(Metric):
                 fig = self.draw_dist_plots(max_scores, labels, fg_mask, sname)
                 results[f'dist_plots_{sname}'] = fig
                 plt.close()
+        
+        if self.target_to_align=='gt_labels_pre_gt_wa':
+            target_dist = _get_cls_dist(_lbl(acc_metrics[self.target_to_align].view(-1)))
+        elif self.target_to_align=='uniform':
+            target_dist = self.mean_p_model['uniform']
+        else:
+            raise ValueError(f"Invalid target_to_align : {self.target_to_align}")
+        
 
-        # ratio =  _lbl(self.mean_p_model['sem_scores_pre_gt_wa']) / (_ulb(self.mean_p_model['sem_scores_wa']) + 1e-6)
-        ratio =  _get_cls_dist(_lbl(acc_metrics[self.target_to_align].view(-1))) / (_ulb(self.mean_p_model['sem_scores_wa']) + 1e-6)
+        if self.source_align_metric=='labels_hist':
+            source_dist = (_ulb(self.labels_hist['sem_scores_wa']) + 1e-6)
+        elif self.source_align_metric=='mean_p_model':
+            source_dist = (_ulb(self.mean_p_model['sem_scores_wa']) + 1e-6)
+        else:
+            raise ValueError(f"Invalid source_align_metric : {self.source_align_metric}")
+
+        ratio =  target_dist / source_dist
         self._update_ema('ratio', ratio, 'AdaMatch')
-        results[f'ratio/lbl_{self.target_to_align}_over_ulb_wa'] = self._arr2dict(self.ratio['AdaMatch'])
+        results[f'ratio/lbl_{self.target_to_align}_over_{self.source_align_metric}_ulb_wa'] = self._arr2dict(self.ratio['AdaMatch'])
 
         results['labels_hist_lbl/gts_wa'] = self._arr2dict(_get_cls_dist(_lbl(acc_metrics['gt_labels_wa'].view(-1))))
         results['labels_hist_lbl/gts_sa'] = self._arr2dict(_get_cls_dist(_lbl(acc_metrics['gt_labels_sa'].view(-1))))
@@ -258,8 +274,9 @@ class AdaMatch(Metric):
         assert self.thresh_method in ['AdaMatch', 'FreeMatch'], f'{self.thresh_method} not in list [AdaMatch, FreeMatch, SoftMatch]'
 
         scores = torch.softmax(logits / self.temperature, dim=-1)
-        if self.thresh_method == 'AdaMatch':
+        if self.enable_dist_alignment:
             scores = self.rectify_sem_scores(scores)
+        if self.thresh_method == 'AdaMatch':
             max_scores, labels = torch.max(scores, dim=-1)
             return max_scores > self._get_threshold(tag=self.lab_thresh_tag, thresh_alg=self.thresh_method), scores
 
